@@ -59,11 +59,15 @@
 		app.toast(`Backup imported. Imported accounts use the temporary password ${res.tempPassword}.`, 'success');
 	}
 
-	function startFresh() {
+	async function startFresh() {
 		freshOpen = false;
-		app.startFresh();
-		app.toast('All data in this browser was cleared.', 'info');
-		window.location.href = '/manager/login';
+		const res = await app.startFresh();
+		if (!res.ok) {
+			app.toast(res.error ?? 'Could not clear the data.', 'error');
+			return;
+		}
+		app.toast('All shared data was cleared.', 'info');
+		window.location.href = '/manager';
 	}
 </script>
 
@@ -126,9 +130,9 @@
 
 	<div class="card">
 		<div class="card-head"><h2>JSON backup</h2><Icon name="upload" size={18} /></div>
-		<p>Move your demo data between browsers. Backups never contain passwords or password hashes.</p>
+		<p>A full snapshot of the shared dataset. Backups never contain passwords or password hashes.</p>
 		<div class="row">
-			<button class="btn" onclick={() => run('Backup', async () => downloadBackup())} data-testid="export-backup">Export backup</button>
+			<button class="btn" onclick={() => run('Backup', () => downloadBackup())} data-testid="export-backup">Export backup</button>
 			<label class="btn" style="cursor:pointer">
 				{importing ? 'Importing...' : 'Import backup'}
 				<input type="file" accept="application/json,.json" onchange={onImport} style="display:none" data-testid="import-backup" />
@@ -159,11 +163,11 @@
 <ConfirmDialog
 	open={freshOpen}
 	title="Delete all data in this browser?"
-	message="Every account, feedback item, pulse response and notification stored in this browser will be removed, and you will be signed out. Export a JSON backup first if you want to keep the data."
+	message="Every account, feedback item, pulse response and notification will be removed FOR EVERYONE on every device. Your admin account is kept so you can sign back in. Export a JSON backup first if you want to keep the data."
 	confirmLabel="Delete everything"
 	danger
 	requireText="DELETE"
-	onconfirm={startFresh}
+	onconfirm={() => void startFresh()}
 	oncancel={() => (freshOpen = false)}
 	testid="start-fresh-dialog"
 />

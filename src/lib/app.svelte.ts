@@ -1,48 +1,30 @@
-// Central app state (Svelte 5 runes) on top of the FeedbackStore.
+// Central app state (Svelte 5 runes) on top of the shared API.
 //
-// Design notes:
-// - One `$state` database object; every mutation goes through `commit()` which
-//   persists via the store. No reactive loops: effects never write state that
-//   they also read as a dependency.
-// - Session/lockout/role rules live in core/rules.ts and are only applied here.
+// WHAT CHANGED AND WHY
+// This used to hold the entire database in the browser and write it to
+// localStorage. That made every device an island: an employee's ticket never
+// reached the manager portal. Now this is a thin client over the server:
+// - `account` and `settings` come from /api/auth/me (the server decides the role)
+// - feedback, ideas, pulse and notifications are fetched per portal
+// - every mutation posts to the API, then refreshes from the response
+//
+// Only two things remain browser-local, and both are genuinely per-device:
+// the theme (mirrored to the server for signed-in users) and the anonymous
+// tracking codes the user has been issued on this device.
 import { browser } from '$app/environment';
 import { goto } from '$app/navigation';
-import { LocalFeedbackStore, type FeedbackStore, type StoreStatus } from './core/store.ts';
-import { emptyDatabase } from './core/defaults.ts';
-import { buildSampleDatabase, id } from './core/seed.ts';
-import { hashPassword, verifyPassword } from './core/password.ts';
-import {
-	CONFIDENTIAL_CATEGORY,
-	type Account,
-	type Comment,
-	type Database,
-	type Feedback,
-	type FeedbackType,
-	type Notification,
-	type Priority,
-	type PulseResponse,
-	type Role,
-	type Sentiment,
-	type Session,
-	type Settings,
-	type Status,
-	type Urgency
-} from './core/types.ts';
-import {
-	canBePublic,
-	checkTransition,
-	effectiveSla,
-	estimateSentiment,
-	generateTrackingCode,
-	findByTrackingCode,
-	isOverdue,
-	lockState,
-	registerFailure,
-	scopeForStaff,
-	sessionState,
-	slaDueDate
-} from './core/rules.ts';
-import { weekKey } from './core/time.ts';
+import { api, type OwnerOption, type SafeAccount } from './api.ts';
+import { defaultSettings } from './core/defaults.ts';
+import type { Feedback, Notification, Priority, PulseQuestion, Role, Sentiment, Settings, Status } from './core/types.ts';
+import { effectiveSla, isOverdue, scopeForStaff, slaDueDate, type Enps } from './core/rules.ts';
+import type { PulseScore, PulseSummary } from './core/stats.ts';
+
+/** Server-computed pulse aggregates (the threshold is applied server-side). */
+export interface PulseResultsPayload {
+	overall: PulseSummary;
+	byDepartment: Array<{ department: string; responses: number; shown: boolean; scores: PulseScore[]; enps: Enps | null }>;
+	threshold: number;
+}
 
 export interface Toast {
 	id: string;
@@ -50,56 +32,128 @@ export interface Toast {
 	tone: 'info' | 'success' | 'warn' | 'error';
 }
 
+const THEME_KEY = 'voicebox.theme';
+const CODES_KEY = 'voicebox.codes';
+
+let toastSeq = 0;
+
 class AppState {
-	store: FeedbackStore = new LocalFeedbackStore(emptyDatabase);
-	db = $state<Database>(emptyDatabase());
-	session = $state<Session | null>(null);
+	// ----- identity (server-owned) -----
+	account = $state<SafeAccount | null>(null);
+	settings = $state<Settings>(defaultSettings());
 	ready = $state(false);
-	storeStatus = $state<StoreStatus>({ available: true });
+	/** True while a portal fetch is in flight, for skeleton loaders. */
+	loading = $state(false);
+
+	// ----- data (server-owned) -----
+	items = $state<Feedback[]>([]); // staff: scoped triage feed
+	mine = $state<Feedback[]>([]); // employee: my named feedback
+	ideas = $state<Feedback[]>([]); // employee: public ideas board
+	wall = $state<Feedback[]>([]); // employee: you said, we did
+	owners = $state<OwnerOption[]>([]);
+	notifications = $state<Notification[]>([]);
+	unreadCount = $state(0);
+	pulseAnswered = $state(false);
+	pulseQuestions = $state<PulseQuestion[]>([]);
+	/** Staff only: server-computed pulse aggregates, threshold already applied. */
+	pulseResults = $state<PulseResultsPayload | null>(null);
+
+	// ----- ui -----
 	toasts = $state<Toast[]>([]);
-	/** Set when the inactivity warning should be visible. */
 	idleWarning = $state(false);
-	/** Message shown on a login page after a redirect from a protected route. */
 	redirectMessage = $state('');
+	/** Set when shared storage is unreachable, shown as a banner. */
+	connectionError = $state('');
+	/** Tracking codes issued on this device (local convenience only). */
+	myCodes = $state<Array<{ code: string; title: string; at: number }>>([]);
 
 	// ----- lifecycle --------------------------------------------------------
 
-	/** Loads data from storage; seeds sample data on first launch. */
 	async init(): Promise<void> {
 		if (!browser || this.ready) return;
-		this.db = this.store.read();
-		this.storeStatus = this.store.status();
-		if (!this.db.seeded || this.db.accounts.length === 0) {
-			this.db = await buildSampleDatabase();
-			this.commit();
-		}
-		const s = this.store.session();
-		if (s) {
-			const state = sessionState(s, Date.now());
-			if (state === 'active') {
-				this.session = s;
-				this.touch();
-			} else {
-				this.store.setSession(null);
-				this.session = null;
-				if (state === 'expired') this.redirectMessage = 'Your session expired after 8 hours. Please sign in again.';
-				if (state === 'idle') this.redirectMessage = 'You were signed out after 15 minutes of inactivity.';
-			}
-		}
-		this.applyTheme();
+		this.applyStoredTheme();
+		this.myCodes = this.readCodes();
+		await this.refreshIdentity();
 		this.ready = true;
 	}
 
-	commit(): void {
-		this.storeStatus = this.store.write($state.snapshot(this.db) as Database);
-		if (!this.storeStatus.available && this.storeStatus.message) {
-			// Surface storage problems once, not on every keystroke.
-			if (!this.toasts.some((t) => t.text === this.storeStatus.message)) this.toast(this.storeStatus.message, 'error');
+	/** Re-reads who we are from the server. The server is authoritative. */
+	async refreshIdentity(): Promise<void> {
+		const res = await api.me();
+		if (!res.ok) {
+			this.connectionError = res.error;
+			return;
+		}
+		this.connectionError = '';
+		this.account = res.account;
+		if (res.settings) this.settings = { ...defaultSettings(), ...res.settings };
+		if (res.reason) this.redirectMessage = res.reason;
+		this.applyTheme();
+	}
+
+	/** Loads the data the current portal needs. Safe to call repeatedly. */
+	async loadPortal(): Promise<void> {
+		if (!this.account) return;
+		this.loading = true;
+		try {
+			const feed = await api.feed();
+			if (!feed.ok) {
+				// A 401 here means the session ended server-side (expiry/idle).
+				if (feed.reason) await this.handleSessionEnd(feed.error);
+				else this.connectionError = feed.error;
+				return;
+			}
+			this.connectionError = '';
+			if (this.isStaff) {
+				this.items = feed.items ?? [];
+				this.owners = feed.owners ?? [];
+			} else {
+				this.mine = feed.mine ?? [];
+				this.ideas = feed.ideas ?? [];
+				this.wall = feed.wall ?? [];
+			}
+
+			const [notes, pulse] = await Promise.all([api.notifications(), api.pulse()]);
+			if (notes.ok) {
+				this.notifications = notes.items;
+				this.unreadCount = notes.unread;
+			}
+			if (pulse.ok) {
+				this.pulseAnswered = Boolean(pulse.answered);
+				if (pulse.questions) this.pulseQuestions = pulse.questions;
+				if (pulse.overall) {
+					this.pulseResults = {
+						overall: pulse.overall as PulseResultsPayload['overall'],
+						byDepartment: (pulse.byDepartment ?? []) as PulseResultsPayload['byDepartment'],
+						threshold: pulse.threshold ?? this.settings.anonymityThreshold
+					};
+				}
+			}
+		} finally {
+			this.loading = false;
 		}
 	}
 
+	/** Generates time-derived notifications once per portal load. */
+	async refreshDerivedNotifications(): Promise<void> {
+		if (!this.account) return;
+		const res = await api.refreshNotifications();
+		if (res.ok) {
+			this.notifications = res.items;
+			this.unreadCount = res.unread;
+		}
+	}
+
+	private async handleSessionEnd(message: string): Promise<void> {
+		const to = this.account?.role === 'employee' ? '/login' : '/manager/login';
+		this.account = null;
+		this.redirectMessage = message;
+		this.idleWarning = false;
+		await goto(to);
+	}
+
 	toast(text: string, tone: Toast['tone'] = 'info'): void {
-		const t: Toast = { id: id('toast'), text, tone };
+		const t: Toast = { id: `toast-${++toastSeq}`, text, tone };
 		this.toasts = [...this.toasts, t];
 		setTimeout(() => this.dismiss(t.id), 4200);
 	}
@@ -108,557 +162,370 @@ class AppState {
 		this.toasts = this.toasts.filter((t) => t.id !== toastId);
 	}
 
-	// ----- accounts / auth --------------------------------------------------
-
-	get account(): Account | undefined {
-		return this.session ? this.db.accounts.find((a) => a.id === this.session!.accountId) : undefined;
+	/** Surfaces an API error as a toast and returns false, for terse callers. */
+	private problem(message: string): false {
+		this.toast(message, 'error');
+		return false;
 	}
+
+	// ----- roles ------------------------------------------------------------
 
 	get role(): Role | undefined {
 		return this.account?.role;
 	}
-
 	get isAdmin(): boolean {
 		return this.role === 'admin';
 	}
-
 	get isStaff(): boolean {
 		return this.role === 'manager' || this.role === 'admin';
 	}
-
-	accountById(accountId: string | undefined): Account | undefined {
-		return accountId ? this.db.accounts.find((a) => a.id === accountId) : undefined;
+	get sla() {
+		return effectiveSla(this.settings);
 	}
 
-	lockInfo(email: string) {
-		return lockState(this.db.lockouts[email.trim().toLowerCase()], Date.now());
+	/** Items in scope, already server-filtered; re-applied locally for safety. */
+	get scopedFeedback(): Feedback[] {
+		if (!this.account || !this.isStaff) return [];
+		return scopeForStaff(this.items, this.account);
 	}
 
-	/**
-	 * Simulated browser-side sign-in. Returns a generic error on purpose, so the
-	 * form never reveals whether an email exists.
-	 */
+	byId(itemId: string): Feedback | undefined {
+		return this.items.find((f) => f.id === itemId) ?? this.mine.find((f) => f.id === itemId) ?? this.ideas.find((f) => f.id === itemId);
+	}
+
+	myFeedback(): Feedback[] {
+		return [...this.mine].sort((a, b) => b.createdAt - a.createdAt);
+	}
+
+	// ----- auth -------------------------------------------------------------
+
 	async signIn(email: string, password: string, portal: 'employee' | 'manager'): Promise<{ ok: boolean; error?: string }> {
-		const key = email.trim().toLowerCase();
-		const lock = lockState(this.db.lockouts[key], Date.now());
-		if (lock.locked) {
-			return { ok: false, error: `Too many failed attempts. Try again in ${Math.ceil(lock.remainingMs / 60_000)} minute(s).` };
-		}
-		const account = this.db.accounts.find((a) => a.email.toLowerCase() === key);
-		const ok = account?.active ? await verifyPassword(password, account.cred) : false;
-		if (!ok || !account) {
-			this.db.lockouts[key] = registerFailure(this.db.lockouts[key], Date.now());
-			this.commit();
-			const after = lockState(this.db.lockouts[key], Date.now());
-			const suffix = after.locked
-				? ' The form is locked for 5 minutes.'
-				: after.attemptsLeft <= 2
-					? ` ${after.attemptsLeft} attempt(s) left before the form locks for 5 minutes.`
-					: '';
-			return { ok: false, error: `Email or password is incorrect.${suffix}` };
-		}
-		// Portal check: the manager portal is for Manager and Admin/HR only.
-		if (portal === 'manager' && account.role === 'employee') {
-			return { ok: false, error: 'This account does not have manager portal access. Use the employee sign-in.' };
-		}
-		if (portal === 'employee' && account.role !== 'employee') {
-			return { ok: false, error: 'This is a manager account. Please use the manager portal sign-in.' };
-		}
-		delete this.db.lockouts[key];
-		const now = Date.now();
-		this.session = { accountId: account.id, role: account.role, startedAt: now, lastSeenAt: now };
-		this.store.setSession(this.session);
+		const res = await api.login(email, password, portal);
+		if (!res.ok) return { ok: false, error: res.error };
+		this.account = res.account;
 		this.redirectMessage = '';
 		this.idleWarning = false;
-		this.commit();
+		await this.refreshIdentity();
+		await this.loadPortal();
+		await this.refreshDerivedNotifications();
 		return { ok: true };
 	}
 
-	signOut(message = ''): void {
-		this.session = null;
-		this.store.setSession(null);
+	async signOut(message = ''): Promise<void> {
+		await api.logout();
+		this.account = null;
+		this.items = [];
+		this.mine = [];
+		this.ideas = [];
+		this.wall = [];
+		this.notifications = [];
+		this.unreadCount = 0;
 		this.idleWarning = false;
 		this.redirectMessage = message;
 	}
 
-	/** Refreshes the inactivity clock. Called from user interaction handlers. */
+	async changePassword(current: string, next: string): Promise<{ ok: boolean; error?: string }> {
+		const res = await api.changePassword(current, next);
+		return res.ok ? { ok: true } : { ok: false, error: res.error };
+	}
+
+	/**
+	 * Session heartbeat. The server enforces the 8-hour and 15-minute limits;
+	 * this just asks it whether we are still signed in, and shows the warning
+	 * shortly before the inactivity cut-off.
+	 */
+	async checkSession(): Promise<void> {
+		if (!this.account) return;
+		const res = await api.me();
+		if (!res.ok) {
+			this.connectionError = res.error;
+			return;
+		}
+		if (!res.account) {
+			await this.handleSessionEnd(res.reason ?? 'You were signed out.');
+			return;
+		}
+		this.account = res.account;
+	}
+
+	/** Any interaction refreshes the server-side inactivity window. */
 	touch(): void {
-		if (!this.session) return;
-		this.session = { ...this.session, lastSeenAt: Date.now() };
-		this.store.setSession(this.session);
 		this.idleWarning = false;
-	}
-
-	/** Called by the layout heartbeat; returns true when the session was ended. */
-	checkSession(): boolean {
-		if (!this.session) return false;
-		const state = sessionState(this.session, Date.now());
-		if (state === 'expired') {
-			const to = this.session.role === 'employee' ? '/login' : '/manager/login';
-			this.signOut('Your session expired after 8 hours. Please sign in again.');
-			void goto(to);
-			return true;
-		}
-		if (state === 'idle') {
-			const to = this.session.role === 'employee' ? '/login' : '/manager/login';
-			this.signOut('You were signed out after 15 minutes of inactivity.');
-			void goto(to);
-			return true;
-		}
-		this.idleWarning = Date.now() - this.session.lastSeenAt >= 14 * 60_000;
-		return false;
-	}
-
-	async changePassword(accountId: string, current: string, next: string): Promise<{ ok: boolean; error?: string }> {
-		const account = this.db.accounts.find((a) => a.id === accountId);
-		if (!account) return { ok: false, error: 'Account not found.' };
-		if (!(await verifyPassword(current, account.cred))) return { ok: false, error: 'Your current password is incorrect.' };
-		account.cred = await hashPassword(next);
-		account.mustChangePassword = false;
-		this.commit();
-		return { ok: true };
-	}
-
-	async createAccount(input: { name: string; email: string; password: string; role: Role; department: string; title?: string }): Promise<{ ok: boolean; error?: string }> {
-		const email = input.email.trim().toLowerCase();
-		if (this.db.accounts.some((a) => a.email.toLowerCase() === email)) return { ok: false, error: 'An account with that email already exists.' };
-		this.db.accounts.push({
-			id: id('acct'),
-			name: input.name.trim(),
-			email,
-			role: input.role,
-			department: input.department,
-			title: input.title?.trim(),
-			active: true,
-			createdAt: Date.now(),
-			cred: await hashPassword(input.password)
-		});
-		this.commit();
-		return { ok: true };
-	}
-
-	setAccountActive(accountId: string, active: boolean): void {
-		const a = this.db.accounts.find((x) => x.id === accountId);
-		if (!a) return;
-		a.active = active;
-		this.commit();
-	}
-
-	async resetPassword(accountId: string, password: string): Promise<void> {
-		const a = this.db.accounts.find((x) => x.id === accountId);
-		if (!a) return;
-		a.cred = await hashPassword(password);
-		a.mustChangePassword = true;
-		this.commit();
-	}
-
-	// ----- settings / theme -------------------------------------------------
-
-	get settings(): Settings {
-		return this.db.settings;
-	}
-
-	get sla() {
-		return effectiveSla(this.db.settings);
-	}
-
-	saveSettings(patch: Partial<Settings>): void {
-		this.db.settings = { ...this.db.settings, ...patch };
-		this.commit();
-		this.applyTheme();
-	}
-
-	applyTheme(): void {
-		if (!browser) return;
-		document.documentElement.dataset.theme = this.db.settings.theme;
-	}
-
-	toggleTheme(): void {
-		this.saveSettings({ theme: this.db.settings.theme === 'dark' ? 'light' : 'dark' });
 	}
 
 	// ----- feedback ---------------------------------------------------------
 
-	get feedback(): Feedback[] {
-		return this.db.feedback;
-	}
-
-	/** Items the signed-in staff member may see (department scoping + confidential). */
-	get scopedFeedback(): Feedback[] {
-		const a = this.account;
-		if (!a || a.role === 'employee') return [];
-		return scopeForStaff(this.db.feedback, a);
-	}
-
-	byId(itemId: string): Feedback | undefined {
-		return this.db.feedback.find((f) => f.id === itemId);
-	}
-
-	myFeedback(): Feedback[] {
-		const a = this.account;
-		if (!a) return [];
-		// Anonymous items never appear here, even when submitted while signed in.
-		return this.db.feedback.filter((f) => !f.anonymous && f.authorId === a.id).sort((x, y) => y.createdAt - x.createdAt);
-	}
-
-	findByCode(code: string): Feedback | undefined {
-		return findByTrackingCode(this.db.feedback, code);
-	}
-
-	submitFeedback(input: {
+	async submitFeedback(input: {
 		title: string;
 		description: string;
-		type: FeedbackType;
+		type: string;
 		category: string;
 		department: string;
-		urgency: Urgency;
+		urgency: string;
 		anonymous: boolean;
 		makePublic: boolean;
-	}): Feedback {
-		const author = input.anonymous ? undefined : this.account;
-		const at = Date.now();
-		const sentiment = estimateSentiment(`${input.title} ${input.description}`, this.settings.sentimentPositive, this.settings.sentimentNegative);
-		const item: Feedback = {
-			id: id('fb'),
-			title: input.title.trim(),
-			description: input.description.trim(),
-			type: input.type,
-			category: input.category,
-			department: input.department || author?.department || 'Unspecified',
-			urgency: input.urgency,
-			anonymous: input.anonymous,
-			authorId: author?.id,
-			authorName: author?.name,
-			trackingCode: input.anonymous ? generateTrackingCode() : undefined,
-			createdAt: at,
-			updatedAt: at,
-			status: 'New',
-			priority: input.urgency === 'High' ? 'High' : input.urgency === 'Medium' ? 'Medium' : 'Low',
-			sentiment,
-			tags: [],
-			isPublic: input.makePublic && canBePublic(input),
-			upvotes: [],
-			comments: [],
-			responses: [],
-			notes: [],
-			history: [{ at, actorRole: 'submitter', actorName: input.anonymous ? 'Anonymous' : (author?.name ?? 'Employee'), to: 'New', note: 'Feedback submitted' }],
-			readBy: []
-		};
-		this.db.feedback = [item, ...this.db.feedback];
-		// Notify the managers who can see it (department managers, or Admin for confidential).
-		const recipients = this.db.accounts.filter((a) =>
-			a.active && (a.role === 'admin' || (a.role === 'manager' && a.department === item.department && item.category !== CONFIDENTIAL_CATEGORY))
-		);
-		for (const r of recipients) this.notify(r.id, 'status', `New ${item.type.toLowerCase()} in ${item.department}: ${item.title}`, `/manager/inbox?item=${item.id}`);
-		this.commit();
-		return item;
+		confidentialAck?: boolean;
+	}): Promise<{ ok: boolean; item?: Feedback; errors?: Record<string, string>; error?: string }> {
+		const res = await api.submit(input);
+		if (!res.ok) return { ok: false, errors: res.errors, error: res.error };
+		// Remember an anonymous code locally so the submitter can find it again
+		// on this device; it is never sent anywhere.
+		if (res.item.trackingCode) this.rememberCode(res.item.trackingCode, res.item.title);
+		await this.loadPortal();
+		return { ok: true, item: res.item };
 	}
 
-	// ----- triage -----------------------------------------------------------
+	// ----- triage (staff) ---------------------------------------------------
 
-	private logHistory(item: Feedback, note: string, from?: Status, to?: Status): void {
-		const actor = this.account;
-		item.history = [...item.history, { at: Date.now(), actorRole: actor?.role ?? 'system', actorName: actor?.name ?? 'System', from, to, note }];
-		item.updatedAt = Date.now();
+	/** Applies the server's updated item back into the local list. */
+	private apply(item: Feedback): void {
+		this.items = this.items.map((f) => (f.id === item.id ? item : f));
 	}
 
-	setStatus(itemId: string, to: Status, reason = ''): { ok: boolean; error?: string } {
-		const item = this.byId(itemId);
-		if (!item) return { ok: false, error: 'Item not found.' };
-		const check = checkTransition(item.status, to, reason);
-		if (!check.ok) return check;
-		const from = item.status;
-		item.status = to;
-		if (to === 'Resolved') item.resolvedAt = Date.now();
-		if (to === 'Declined') item.declineReason = reason.trim();
-		if (from === 'Resolved' && to !== 'Resolved') item.resolvedAt = undefined;
-		this.logHistory(item, to === 'Declined' ? `Declined: ${reason.trim()}` : `Status changed to ${to}`, from, to);
-		if (item.authorId) this.notify(item.authorId, 'status', `Your feedback "${item.title}" is now ${to}`, `/app/my-feedback?item=${item.id}`);
-		this.commit();
+	async setStatus(itemId: string, to: Status, reason = ''): Promise<{ ok: boolean; error?: string }> {
+		const res = await api.setStatus(itemId, to, reason);
+		if (!res.ok) return { ok: false, error: res.error };
+		this.apply(res.item);
 		return { ok: true };
 	}
 
-	setPriority(itemId: string, priority: Priority): void {
-		const item = this.byId(itemId);
-		if (!item || item.priority === priority) return;
-		const was = item.priority;
-		item.priority = priority;
-		this.logHistory(item, `Priority changed from ${was} to ${priority}`);
-		this.commit();
+	async setPriority(itemId: string, priority: Priority): Promise<void> {
+		const res = await api.setPriority(itemId, priority);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	setSentiment(itemId: string, sentiment: Sentiment): void {
-		const item = this.byId(itemId);
-		if (!item || item.sentiment === sentiment) return;
-		const was = item.sentiment;
-		item.sentiment = sentiment;
-		item.sentimentOverridden = true;
-		this.logHistory(item, `Sentiment overridden from ${was} to ${sentiment}`);
-		this.commit();
+	async setSentiment(itemId: string, sentiment: Sentiment): Promise<void> {
+		const res = await api.setSentiment(itemId, sentiment);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	setOwner(itemId: string, ownerId: string): void {
-		const item = this.byId(itemId);
-		if (!item) return;
-		const owner = this.accountById(ownerId);
-		item.ownerId = owner?.id;
-		item.ownerName = owner?.name;
-		this.logHistory(item, owner ? `Owner set to ${owner.name}` : 'Owner cleared');
-		if (owner && owner.id !== this.account?.id) this.notify(owner.id, 'assigned', `You were assigned: ${item.title}`, `/manager/inbox?item=${item.id}`);
-		this.commit();
+	async setOwner(itemId: string, ownerId: string): Promise<void> {
+		const res = await api.setOwner(itemId, ownerId);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	setDueDate(itemId: string, due: number | undefined): void {
-		const item = this.byId(itemId);
-		if (!item) return;
-		item.dueDate = due;
-		this.logHistory(item, due ? `Due date set to ${new Date(due).toLocaleDateString()}` : 'Due date cleared');
-		this.commit();
+	async setDueDate(itemId: string, due: number | undefined): Promise<void> {
+		const res = await api.setDue(itemId, due ?? null);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	addTag(itemId: string, tag: string): void {
-		const item = this.byId(itemId);
-		const clean = tag.trim().toLowerCase().replace(/\s+/g, '-');
-		if (!item || !clean || item.tags.includes(clean)) return;
-		item.tags = [...item.tags, clean];
-		this.logHistory(item, `Tag added: ${clean}`);
-		this.commit();
+	async addTag(itemId: string, tag: string): Promise<void> {
+		const res = await api.addTag(itemId, tag);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	removeTag(itemId: string, tag: string): void {
-		const item = this.byId(itemId);
-		if (!item) return;
-		item.tags = item.tags.filter((t) => t !== tag);
-		this.logHistory(item, `Tag removed: ${tag}`);
-		this.commit();
+	async removeTag(itemId: string, tag: string): Promise<void> {
+		const res = await api.removeTag(itemId, tag);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	addNote(itemId: string, text: string): void {
-		const item = this.byId(itemId);
-		const actor = this.account;
-		if (!item || !actor || !text.trim()) return;
-		item.notes = [...item.notes, { id: id('note'), at: Date.now(), authorId: actor.id, authorName: actor.name, text: text.trim() }];
-		item.updatedAt = Date.now();
-		this.commit();
+	async addNote(itemId: string, text: string): Promise<void> {
+		const res = await api.addNote(itemId, text);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	addResponse(itemId: string, text: string): void {
-		const item = this.byId(itemId);
-		const actor = this.account;
-		if (!item || !actor || !text.trim()) return;
-		const at = Date.now();
-		item.responses = [...item.responses, { id: id('resp'), at, authorRole: actor.role, authorName: actor.name, text: text.trim() }];
-		if (!item.firstResponseAt) item.firstResponseAt = at;
-		this.logHistory(item, 'Public response added');
-		if (item.authorId) this.notify(item.authorId, 'response', `A response was added to "${item.title}"`, `/app/my-feedback?item=${item.id}`);
-		this.commit();
+	async addResponse(itemId: string, text: string): Promise<void> {
+		const res = await api.addResponse(itemId, text);
+		res.ok ? this.apply(res.item) : this.problem(res.error);
 	}
 
-	markRead(itemId: string, read = true): void {
-		const item = this.byId(itemId);
-		const actor = this.account;
-		if (!item || !actor) return;
-		const has = item.readBy.includes(actor.id);
-		if (read && !has) item.readBy = [...item.readBy, actor.id];
-		if (!read && has) item.readBy = item.readBy.filter((x) => x !== actor.id);
-		this.commit();
+	async markRead(itemId: string, read = true): Promise<void> {
+		const item = this.items.find((f) => f.id === itemId);
+		if (!item || !this.account) return;
+		// Skip a pointless round trip when the state already matches.
+		if (read === item.readBy.includes(this.account.id)) return;
+		const res = await api.markRead(itemId, read);
+		if (res.ok) this.apply(res.item);
 	}
 
 	isUnread(item: Feedback): boolean {
-		const a = this.account;
-		return a ? !item.readBy.includes(a.id) : false;
+		return this.account ? !item.readBy.includes(this.account.id) : false;
 	}
 
-	/** Bulk actions from the inbox/board selection. */
-	bulk(itemIds: string[], action: { kind: 'status'; value: Status; reason?: string } | { kind: 'owner'; value: string } | { kind: 'tag'; value: string }): number {
+	/** Bulk actions, applied sequentially so the shared store stays consistent. */
+	async bulk(itemIds: string[], action: { kind: 'status'; value: Status; reason?: string } | { kind: 'owner'; value: string } | { kind: 'tag'; value: string }): Promise<number> {
 		let changed = 0;
 		for (const itemId of itemIds) {
 			if (action.kind === 'status') {
-				if (this.setStatus(itemId, action.value, action.reason ?? 'Bulk update').ok) changed++;
+				if ((await this.setStatus(itemId, action.value, action.reason ?? 'Bulk update')).ok) changed++;
 			} else if (action.kind === 'owner') {
-				this.setOwner(itemId, action.value);
+				await this.setOwner(itemId, action.value);
 				changed++;
 			} else {
-				this.addTag(itemId, action.value);
+				await this.addTag(itemId, action.value);
 				changed++;
 			}
 		}
 		return changed;
 	}
 
-	// ----- ideas board ------------------------------------------------------
+	// ----- ideas ------------------------------------------------------------
 
-	toggleUpvote(itemId: string): void {
-		const item = this.byId(itemId);
-		const actor = this.account;
-		if (!item || !actor || actor.role !== 'employee') return;
-		item.upvotes = item.upvotes.includes(actor.id) ? item.upvotes.filter((x) => x !== actor.id) : [...item.upvotes, actor.id];
-		this.commit();
+	async toggleUpvote(itemId: string): Promise<void> {
+		const res = await api.upvote(itemId);
+		if (!res.ok) {
+			this.problem(res.error);
+			return;
+		}
+		// Reflect the authoritative count from the server.
+		this.ideas = this.ideas.map((f) =>
+			f.id === itemId
+				? { ...f, upvotes: res.voted ? [...f.upvotes.filter((x) => x !== this.account?.id), this.account!.id] : f.upvotes.filter((x) => x !== this.account?.id) }
+				: f
+		);
 	}
 
 	hasUpvoted(item: Feedback): boolean {
-		const a = this.account;
-		return a ? item.upvotes.includes(a.id) : false;
+		return this.account ? item.upvotes.includes(this.account.id) : false;
 	}
 
-	addComment(itemId: string, text: string): void {
-		const item = this.byId(itemId);
-		const actor = this.account;
-		if (!item || !actor || !text.trim()) return;
-		const comment: Comment = { id: id('cmt'), at: Date.now(), authorId: actor.id, authorName: actor.name, text: text.trim() };
-		item.comments = [...item.comments, comment];
-		this.commit();
+	async addComment(itemId: string, text: string): Promise<void> {
+		const res = await api.comment(itemId, text);
+		if (!res.ok) {
+			this.problem(res.error);
+			return;
+		}
+		this.ideas = this.ideas.map((f) => (f.id === itemId ? { ...f, comments: res.comments } : f));
 	}
 
 	// ----- pulse ------------------------------------------------------------
 
-	currentWeek(): string {
-		return weekKey(Date.now());
+	hasAnsweredPulse(): boolean {
+		return this.pulseAnswered;
 	}
 
-	hasAnsweredPulse(week = this.currentWeek()): boolean {
-		const a = this.account;
-		if (!a) return false;
-		return this.db.participation.some((p) => p.key === `${a.id}:${week}`);
-	}
-
-	submitPulse(scores: Record<string, number>, comment: string): void {
-		const a = this.account;
-		if (!a) return;
-		const week = this.currentWeek();
-		if (this.hasAnsweredPulse(week)) return;
-		const response: PulseResponse = {
-			id: id('pulse'),
-			week,
-			at: Date.now(),
-			department: a.department,
-			scores,
-			comment: comment.trim() || undefined
-		};
-		// The answer carries only the department; the "already responded" marker
-		// is stored separately so answers cannot be linked back to a person.
-		this.db.pulse = [...this.db.pulse, response];
-		this.db.participation = [...this.db.participation, { key: `${a.id}:${week}`, at: Date.now() }];
-		this.commit();
+	async submitPulse(scores: Record<string, number>, comment: string): Promise<{ ok: boolean; error?: string }> {
+		const res = await api.submitPulse(scores, comment);
+		if (!res.ok) return { ok: false, error: res.error };
+		this.pulseAnswered = true;
+		return { ok: true };
 	}
 
 	// ----- notifications ----------------------------------------------------
 
-	notify(accountId: string, kind: Notification['kind'], text: string, href: string): void {
-		this.db.notifications = [
-			{ id: id('ntf'), accountId, at: Date.now(), kind, text, href, read: false },
-			...this.db.notifications
-		].slice(0, 300);
-	}
-
 	get myNotifications(): Notification[] {
-		const a = this.account;
-		if (!a) return [];
-		return this.db.notifications.filter((n) => n.accountId === a.id);
+		return this.notifications;
 	}
 
-	get unreadCount(): number {
-		return this.myNotifications.filter((n) => !n.read).length;
+	async markNotificationRead(notificationId: string): Promise<void> {
+		const res = await api.markNotification(notificationId);
+		if (res.ok) {
+			this.notifications = res.items;
+			this.unreadCount = res.unread;
+		}
 	}
 
-	markNotificationRead(notificationId: string): void {
-		const n = this.db.notifications.find((x) => x.id === notificationId);
-		if (!n) return;
-		n.read = true;
-		this.commit();
+	async markAllNotificationsRead(): Promise<void> {
+		const res = await api.markAllNotifications();
+		if (res.ok) {
+			this.notifications = res.items;
+			this.unreadCount = res.unread;
+		}
 	}
 
-	markAllNotificationsRead(): void {
-		const a = this.account;
-		if (!a) return;
-		for (const n of this.db.notifications) if (n.accountId === a.id) n.read = true;
-		this.commit();
+	// ----- settings / theme -------------------------------------------------
+
+	async saveSettings(patch: Partial<Settings>): Promise<{ ok: boolean; error?: string }> {
+		const res = await api.saveSettings(patch);
+		if (!res.ok) return { ok: false, error: res.error };
+		this.settings = { ...defaultSettings(), ...res.settings };
+		this.applyTheme();
+		return { ok: true };
 	}
 
 	/**
-	 * Generates the "derived" notifications that depend on time: overdue items
-	 * for owners and a new-pulse reminder. Called once per session, never from a
-	 * reactive effect, so it cannot loop.
+	 * Theme is a per-device preference: applied and stored locally immediately,
+	 * and mirrored to the account when signed in so a new device inherits it.
 	 */
-	refreshDerivedNotifications(): void {
-		const a = this.account;
-		if (!a) return;
-		let changed = false;
-		if (a.role !== 'employee') {
-			for (const item of scopeForStaff(this.db.feedback, a)) {
-				if (item.ownerId !== a.id || !isOverdue(item, Date.now(), this.sla)) continue;
-				const marker = `overdue:${item.id}`;
-				if (this.db.notifications.some((n) => n.accountId === a.id && n.href.includes(marker))) continue;
-				this.notify(a.id, 'overdue', `Overdue: ${item.title}`, `/manager/inbox?item=${item.id}#${marker}`);
-				changed = true;
-			}
-		} else if (!this.hasAnsweredPulse()) {
-			const marker = `pulse:${this.currentWeek()}`;
-			if (!this.db.notifications.some((n) => n.accountId === a.id && n.href.includes(marker))) {
-				this.notify(a.id, 'pulse', 'This week\u2019s pulse survey is available', `/app/pulse#${marker}`);
-				changed = true;
-			}
+	toggleTheme(): void {
+		const theme = this.settings.theme === 'dark' ? 'light' : 'dark';
+		this.settings = { ...this.settings, theme };
+		this.storeTheme(theme);
+		this.applyTheme();
+		if (this.account) void api.saveSettings({ theme });
+	}
+
+	setTheme(theme: 'light' | 'dark'): void {
+		this.settings = { ...this.settings, theme };
+		this.storeTheme(theme);
+		this.applyTheme();
+		if (this.account) void api.saveSettings({ theme });
+	}
+
+	applyTheme(): void {
+		if (!browser) return;
+		document.documentElement.dataset.theme = this.settings.theme;
+	}
+
+	private applyStoredTheme(): void {
+		try {
+			const stored = localStorage.getItem(THEME_KEY);
+			if (stored === 'dark' || stored === 'light') this.settings = { ...this.settings, theme: stored };
+		} catch {
+			// Storage blocked: fall back to the server/default theme.
 		}
-		if (changed) this.commit();
+		this.applyTheme();
 	}
 
-	// ----- data tools -------------------------------------------------------
-
-	/** JSON backup. Credentials are stripped: a backup never carries passwords or hashes. */
-	exportBackup(): string {
-		const snapshot = $state.snapshot(this.db) as Database;
-		const payload = {
-			app: 'VoiceBox',
-			version: snapshot.version,
-			exportedAt: new Date().toISOString(),
-			note: 'Account credentials are not included in backups. Imported accounts get a temporary password.',
-			data: {
-				...snapshot,
-				accounts: snapshot.accounts.map(({ cred: _cred, ...rest }) => ({ ...rest, credRemoved: true })),
-				lockouts: {}
-			}
-		};
-		return JSON.stringify(payload, null, 2);
+	private storeTheme(theme: string): void {
+		try {
+			localStorage.setItem(THEME_KEY, theme);
+		} catch {
+			// Non-fatal: the theme simply will not persist on this device.
+		}
 	}
 
-	/** Imports a backup. Accounts without credentials get a known temporary password. */
+	// ----- local tracking-code memory ---------------------------------------
+
+	private readCodes(): Array<{ code: string; title: string; at: number }> {
+		try {
+			const raw = localStorage.getItem(CODES_KEY);
+			const parsed = raw ? (JSON.parse(raw) as Array<{ code: string; title: string; at: number }>) : [];
+			return Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+		} catch {
+			return [];
+		}
+	}
+
+	private rememberCode(code: string, title: string): void {
+		this.myCodes = [{ code, title, at: Date.now() }, ...this.myCodes.filter((c) => c.code !== code)].slice(0, 20);
+		try {
+			localStorage.setItem(CODES_KEY, JSON.stringify(this.myCodes));
+		} catch {
+			// Non-fatal: the user still has the code on screen to copy.
+		}
+	}
+
+	// ----- admin data tools -------------------------------------------------
+
+	async loadSampleData(): Promise<{ ok: boolean; error?: string }> {
+		const res = await api.loadSample();
+		if (!res.ok) return { ok: false, error: res.error };
+		await this.refreshIdentity();
+		await this.loadPortal();
+		return { ok: true };
+	}
+
 	async importBackup(text: string): Promise<{ ok: boolean; error?: string; tempPassword?: string }> {
-		let parsed: { data?: Partial<Database> } | Partial<Database>;
+		let parsed: unknown;
 		try {
 			parsed = JSON.parse(text);
 		} catch {
 			return { ok: false, error: 'That file is not valid JSON.' };
 		}
-		const raw = ('data' in parsed && parsed.data ? parsed.data : parsed) as Partial<Database>;
-		if (!Array.isArray(raw.feedback) || !Array.isArray(raw.accounts)) return { ok: false, error: 'That backup does not look like a VoiceBox export.' };
-		const temp = 'Voicebox@123';
-		const cred = await hashPassword(temp, 10_000);
-		const accounts: Account[] = raw.accounts.map((a) => ({ ...(a as Account), cred: (a as Account).cred ?? cred }));
-		const { migrate } = await import('./core/store.ts');
-		this.db = migrate({ ...raw, accounts }, emptyDatabase());
-		this.db.seeded = true;
-		this.commit();
-		this.applyTheme();
-		return { ok: true, tempPassword: temp };
+		const res = await api.importBackup(parsed);
+		if (!res.ok) return { ok: false, error: res.error };
+		await this.refreshIdentity();
+		await this.loadPortal();
+		return { ok: true, tempPassword: res.tempPassword };
 	}
 
-	async loadSampleData(): Promise<void> {
-		this.db = await buildSampleDatabase();
-		this.commit();
-		this.applyTheme();
+	async startFresh(): Promise<{ ok: boolean; error?: string }> {
+		const res = await api.startFresh();
+		return res.ok ? { ok: true } : { ok: false, error: res.error };
 	}
 
-	/** Start fresh: clears everything in this browser and signs out. */
-	startFresh(): void {
-		this.store.clearAll();
-		this.db = emptyDatabase();
-		this.db.seeded = true;
-		this.session = null;
-		this.store.setSession(null);
-		this.commit();
-	}
-
-	// ----- helpers used by views -------------------------------------------
+	// ----- view helpers -----------------------------------------------------
 
 	overdue(item: Feedback): boolean {
 		return isOverdue(item, Date.now(), this.sla);
@@ -668,9 +535,8 @@ class AppState {
 		return slaDueDate(item, this.sla);
 	}
 
-	/** People who can own an item (managers + admins), for the owner picker. */
-	get owners(): Account[] {
-		return this.db.accounts.filter((a) => a.active && a.role !== 'employee').sort((x, y) => x.name.localeCompare(y.name));
+	accountById(accountId: string | undefined): OwnerOption | undefined {
+		return accountId ? this.owners.find((a) => a.id === accountId) : undefined;
 	}
 }
 

@@ -31,6 +31,7 @@
 	let declineOpen = $state(false);
 	let declineReason = $state('');
 	let sensitiveAck = $state(false);
+	let busy = $state(false);
 
 	// Reset editor state whenever a different item is opened.
 	let lastId = $state('');
@@ -48,18 +49,20 @@
 	const confidential = $derived(isConfidential(item));
 	const overdue = $derived(app.overdue(item));
 
-	function changeStatus(to: Status) {
+	async function changeStatus(to: Status) {
 		if (to === 'Declined') {
 			declineOpen = true;
 			return;
 		}
-		const res = app.setStatus(item.id, to);
+		busy = true;
+		const res = await app.setStatus(item.id, to);
+		busy = false;
 		if (!res.ok) app.toast(res.error ?? 'Could not change the status.', 'error');
 		else app.toast(`Status changed to ${to}.`, 'success');
 	}
 
-	function decline() {
-		const res = app.setStatus(item.id, 'Declined', declineReason);
+	async function decline() {
+		const res = await app.setStatus(item.id, 'Declined', declineReason);
 		if (!res.ok) {
 			app.toast(res.error ?? 'A reason is required to decline.', 'error');
 			return;
@@ -69,24 +72,29 @@
 		app.toast('Feedback declined with a reason.', 'success');
 	}
 
-	function sendResponse() {
+	async function sendResponse() {
 		if (!response.trim()) return;
-		app.addResponse(item.id, response);
+		busy = true;
+		await app.addResponse(item.id, response);
+		busy = false;
 		response = '';
 		app.toast('Public response added. The submitter was notified.', 'success');
 	}
 
-	function addNote() {
+	async function addNote() {
 		if (!note.trim()) return;
-		app.addNote(item.id, note);
+		busy = true;
+		await app.addNote(item.id, note);
+		busy = false;
 		note = '';
 		app.toast('Internal note saved. Employees never see it.', 'success');
 	}
 
-	function addTag() {
+	async function addTag() {
 		if (!tag.trim()) return;
-		app.addTag(item.id, tag);
+		const value = tag;
 		tag = '';
+		await app.addTag(item.id, value);
 	}
 </script>
 
@@ -138,7 +146,7 @@
 						<span class="label">Status</span>
 						<div class="row" style="gap:6px">
 							{#each nextStatuses(item.status) as s}
-								<button class="btn sm" class:danger={s === 'Declined'} onclick={() => changeStatus(s)} data-testid="status-{s.toLowerCase().replace(/ /g, '-')}">{s}</button>
+								<button class="btn sm" class:danger={s === 'Declined'} onclick={() => void changeStatus(s)} data-testid="status-{s.toLowerCase().replace(/ /g, '-')}">{s}</button>
 							{/each}
 						</div>
 					</div>
@@ -146,13 +154,13 @@
 					<div class="grid-2">
 						<div class="ctl">
 							<label class="label" for="d-priority">Priority</label>
-							<select id="d-priority" class="input" value={item.priority} onchange={(e) => app.setPriority(item.id, e.currentTarget.value as Priority)} data-testid="set-priority">
+							<select id="d-priority" class="input" value={item.priority} onchange={(e) => void app.setPriority(item.id, e.currentTarget.value as Priority)} data-testid="set-priority">
 								{#each PRIORITIES as p}<option value={p}>{p}</option>{/each}
 							</select>
 						</div>
 						<div class="ctl">
 							<label class="label" for="d-owner">Owner</label>
-							<select id="d-owner" class="input" value={item.ownerId ?? ''} onchange={(e) => app.setOwner(item.id, e.currentTarget.value)} data-testid="set-owner">
+							<select id="d-owner" class="input" value={item.ownerId ?? ''} onchange={(e) => void app.setOwner(item.id, e.currentTarget.value)} data-testid="set-owner">
 								<option value="">Unassigned</option>
 								{#each app.owners as o (o.id)}<option value={o.id}>{o.name} ({o.department})</option>{/each}
 							</select>
@@ -167,14 +175,14 @@
 								class="input"
 								type="date"
 								value={item.dueDate ? isoDate(item.dueDate) : ''}
-								onchange={(e) => app.setDueDate(item.id, parseDateInput(e.currentTarget.value))}
+								onchange={(e) => void app.setDueDate(item.id, parseDateInput(e.currentTarget.value))}
 								data-testid="set-due"
 							/>
 							<span class="hint">SLA target: {formatDate(app.due(item))} ({relative(app.due(item))})</span>
 						</div>
 						<div class="ctl">
 							<label class="label" for="d-sentiment">Sentiment <span class="hint">(auto-estimated)</span></label>
-							<select id="d-sentiment" class="input" value={item.sentiment} onchange={(e) => app.setSentiment(item.id, e.currentTarget.value as Sentiment)} data-testid="set-sentiment">
+							<select id="d-sentiment" class="input" value={item.sentiment} onchange={(e) => void app.setSentiment(item.id, e.currentTarget.value as Sentiment)} data-testid="set-sentiment">
 								{#each SENTIMENTS as s}<option value={s}>{s}</option>{/each}
 							</select>
 							{#if item.sentimentOverridden}<span class="hint">Overridden by a manager</span>{/if}
@@ -187,13 +195,13 @@
 							{#each item.tags as t (t)}
 								<span class="pill">
 									{t}
-									<button class="tagx" onclick={() => app.removeTag(item.id, t)} aria-label="Remove tag {t}"><Icon name="close" size={11} /></button>
+									<button class="tagx" onclick={() => void app.removeTag(item.id, t)} aria-label="Remove tag {t}"><Icon name="close" size={11} /></button>
 								</span>
 							{/each}
 						</div>
 						<div class="row" style="margin-top:var(--s-2)">
-							<input class="input" style="flex:1; min-width:140px" bind:value={tag} placeholder="Add a tag" aria-label="Add a tag" data-testid="tag-input" onkeydown={(e) => e.key === 'Enter' && addTag()} />
-							<button class="btn sm" onclick={addTag} data-testid="add-tag">Add</button>
+							<input class="input" style="flex:1; min-width:140px" bind:value={tag} placeholder="Add a tag" aria-label="Add a tag" data-testid="tag-input" onkeydown={(e) => e.key === 'Enter' && void addTag()} />
+							<button class="btn sm" onclick={() => void addTag()} data-testid="add-tag">Add</button>
 						</div>
 					</div>
 				</div>
@@ -216,7 +224,7 @@
 						{/each}
 					</div>
 					<textarea class="input" rows="3" bind:value={response} placeholder="Write a response the submitter will see" aria-label="Public response" data-testid="response-box"></textarea>
-					<button class="btn primary sm" style="margin-top:var(--s-2)" onclick={sendResponse} disabled={!response.trim()} data-testid="send-response">Send response</button>
+					<button class="btn primary sm" style="margin-top:var(--s-2)" onclick={() => void sendResponse()} disabled={!response.trim()} data-testid="send-response">Send response</button>
 				</section>
 
 				<section>
@@ -232,7 +240,7 @@
 						</div>
 					{/if}
 					<textarea class="input" rows="2" bind:value={note} placeholder="Add a private note for the triage team" aria-label="Internal note" data-testid="note-box"></textarea>
-					<button class="btn sm" style="margin-top:var(--s-2)" onclick={addNote} disabled={!note.trim()} data-testid="add-note">Add note</button>
+					<button class="btn sm" style="margin-top:var(--s-2)" onclick={() => void addNote()} disabled={!note.trim()} data-testid="add-note">Add note</button>
 				</section>
 
 				<section>
@@ -241,7 +249,7 @@
 				</section>
 
 				<div class="row foot-actions">
-					<button class="btn sm" onclick={() => app.markRead(item.id, app.isUnread(item))} data-testid="mark-read">
+					<button class="btn sm" onclick={() => void app.markRead(item.id, app.isUnread(item))} data-testid="mark-read">
 						<Icon name="check" size={14} />
 						{app.isUnread(item) ? 'Mark as read' : 'Mark as unread'}
 					</button>
@@ -273,7 +281,7 @@
 	</div>
 	{#snippet footer()}
 		<button class="btn" onclick={() => (declineOpen = false)}>Cancel</button>
-		<button class="btn danger" onclick={decline} disabled={!declineReason.trim()} data-testid="decline-confirm">Decline</button>
+		<button class="btn danger" onclick={() => void decline()} disabled={!declineReason.trim()} data-testid="decline-confirm">Decline</button>
 	{/snippet}
 </Modal>
 

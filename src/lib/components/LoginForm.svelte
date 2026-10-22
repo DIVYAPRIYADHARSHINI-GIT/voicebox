@@ -17,18 +17,20 @@
 	let busy = $state(false);
 	let error = $state('');
 	let demoOpen = $state(false);
+	// The lockout is enforced on the server (it must be, with shared data), so
+	// the UI reflects what the last sign-in attempt reported.
+	let lockedMinutes = $state(0);
+	let lockedUntil = $state(0);
 	let tick = $state(Date.now());
 
-	// Re-render the lock countdown once a second while locked.
 	$effect(() => {
+		if (!lockedUntil) return;
 		const t = setInterval(() => (tick = Date.now()), 1000);
 		return () => clearInterval(t);
 	});
 
-	const lock = $derived.by(() => {
-		void tick;
-		return email.trim() ? app.lockInfo(email) : { locked: false, remainingMs: 0, attemptsLeft: 5 };
-	});
+	const locked = $derived(lockedUntil > tick);
+	const secondsLeft = $derived(Math.max(0, Math.ceil((lockedUntil - tick) / 1000)));
 
 	const demos = $derived(DEMO_ACCOUNTS.filter((a) => (portal === 'manager' ? a.role !== 'employee' : a.role === 'employee')).filter((a) => a.featured));
 
@@ -42,9 +44,18 @@
 		if (!res.ok) {
 			error = res.error ?? 'Email or password is incorrect.';
 			password = '';
+			const mins = /in (\d+) minute/.exec(error)?.[1];
+			if (mins) {
+				lockedMinutes = Number(mins);
+				lockedUntil = Date.now() + Number(mins) * 60_000;
+				tick = Date.now();
+			} else if (/locked for 5 minutes/.test(error)) {
+				lockedMinutes = 5;
+				lockedUntil = Date.now() + 5 * 60_000;
+				tick = Date.now();
+			}
 			return;
 		}
-		app.refreshDerivedNotifications();
 		app.toast(`Signed in as ${app.account?.name}`, 'success');
 		await goto(portal === 'manager' ? '/manager' : '/app');
 	}
@@ -102,14 +113,14 @@
 		<p class="error-text" role="alert" data-testid="login-error" style="margin:0 0 var(--s-3)">{error}</p>
 	{/if}
 
-	{#if lock.locked}
+	{#if locked}
 		<div class="notice danger" style="margin-bottom:var(--s-3)" role="alert" data-testid="lockout-notice">
 			<Icon name="lock" size={16} />
-			<span>Sign-in is locked for this email. Try again in {Math.ceil(lock.remainingMs / 1000)} second(s).</span>
+			<span>Sign-in is locked for this email. Try again in {secondsLeft} second(s).</span>
 		</div>
 	{/if}
 
-	<button class="btn primary block" type="submit" disabled={busy || lock.locked} data-testid="login-submit">
+	<button class="btn primary block" type="submit" disabled={busy || locked} data-testid="login-submit">
 		{busy ? 'Checking...' : 'Sign in'}
 	</button>
 </form>
@@ -117,8 +128,8 @@
 <div class="demo-note">
 	<Icon name="info" size={14} />
 	<p>
-		Demo sign-in runs entirely in this browser. Passwords are hashed with PBKDF2 and stored in local storage, which is
-		<strong>not secure</strong> and is not a substitute for server-side authentication in production.
+		Demo accounts are shared by everyone using this deployment. Passwords are PBKDF2-hashed and verified on the server,
+		but this is still a <strong>demo</strong>: the accounts are public, so do not store anything confidential in it.
 	</p>
 </div>
 

@@ -8,6 +8,7 @@
 	import Toasts from '$lib/components/Toasts.svelte';
 	import DemoBadge from '$lib/components/DemoBadge.svelte';
 	import IdleWarning from '$lib/components/IdleWarning.svelte';
+	import ConnectionBanner from '$lib/components/ConnectionBanner.svelte';
 
 	const { children } = $props();
 
@@ -15,21 +16,35 @@
 		(async () => {
 			await app.init();
 			document.getElementById('boot-loader')?.remove();
-			app.refreshDerivedNotifications();
+			if (app.account) {
+				await app.loadPortal();
+				await app.refreshDerivedNotifications();
+			}
 		})();
 
-		// Session heartbeat: hard expiry at 8 hours, inactivity sign-out at 15
-		// minutes. A plain interval (not a reactive effect) so it cannot loop.
-		const timer = setInterval(() => app.checkSession(), 20_000);
+		// Session heartbeat. The SERVER enforces the 8-hour and 15-minute limits;
+		// this asks it periodically whether we are still signed in. A plain
+		// interval (not a reactive effect) so it cannot loop.
+		const timer = setInterval(() => void app.checkSession(), 60_000);
 		const activity = () => app.touch();
 		for (const ev of ['pointerdown', 'keydown', 'focus'] as const) window.addEventListener(ev, activity, { passive: true });
+
+		// Refresh shared data when the tab regains focus, so a manager sees
+		// tickets raised on other devices without a manual reload.
+		const onVisible = () => {
+			if (document.visibilityState === 'visible' && app.account) void app.loadPortal();
+		};
+		document.addEventListener('visibilitychange', onVisible);
+
 		return () => {
 			clearInterval(timer);
 			for (const ev of ['pointerdown', 'keydown', 'focus'] as const) window.removeEventListener(ev, activity);
+			document.removeEventListener('visibilitychange', onVisible);
 		};
 	});
 
-	// Route protection by role. Runs on every navigation once data is ready.
+	// Route protection by role. The server enforces access to the data itself;
+	// this is the navigational half, so people land on the right portal.
 	//
 	// The effect depends ONLY on the path and the role. Everything it writes
 	// (redirectMessage, toasts, navigation) happens inside `untrack`, so the
@@ -53,6 +68,7 @@
 </script>
 
 <a class="skip-link" href="#main">Skip to main content</a>
+<ConnectionBanner />
 {@render children()}
 <DemoBadge />
 <IdleWarning />

@@ -28,8 +28,14 @@
 
 	const scoped = $derived(app.scopedFeedback);
 	const items = $derived(scoped.filter((f) => inRange(f.createdAt, range)));
-	const pulse = $derived(app.isAdmin ? app.db.pulse : app.db.pulse.filter((p) => p.department === app.account?.department));
-	const kpis = $derived(computeKpis(items, pulse, app.settings));
+	// eNPS is computed server-side (the client never receives raw pulse rows),
+	// so it is spliced into the KPI set here.
+	const pulseAgg = $derived(app.pulseResults?.overall ?? null);
+	const kpis = $derived({
+		...computeKpis(items, [], app.settings),
+		enps: pulseAgg?.enps.score ?? 0,
+		enpsResponses: pulseAgg?.responses ?? 0
+	});
 	const volume = $derived(volumeSeries(items, range));
 	const categories = $derived(byCategory(items));
 	const statuses = $derived(byStatus(items, STATUSES));

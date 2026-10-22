@@ -4,7 +4,7 @@
 	import Icon from './Icon.svelte';
 </script>
 
-{#if app.idleWarning && app.session}
+{#if app.idleWarning && app.account}
 	<div class="idle" role="alert" data-testid="idle-warning">
 		<Icon name="clock" size={16} />
 		<span>You will be signed out shortly because of inactivity.</span>

@@ -43,7 +43,7 @@
 			</header>
 			<div class="cards">
 				{#each col.items.slice(0, COLUMN_CAP) as item (item.id)}
-					<button class="kcard" onclick={() => { openId = item.id; app.markRead(item.id, true); }} data-testid="kanban-card">
+					<button class="kcard" onclick={() => { openId = item.id; void app.markRead(item.id, true); }} data-testid="kanban-card">
 						<strong>{item.title}</strong>
 						<div class="kmeta">
 							<Pill kind="priority" value={item.priority} />

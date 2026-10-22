@@ -2,16 +2,12 @@
 	// "You said, we did": resolved items with their response and date, so people
 	// can see that feedback leads to action. Confidential reports are excluded.
 	import { app } from '$lib/app.svelte.ts';
-	import { isConfidential } from '$lib/core/rules.ts';
 	import { formatDate } from '$lib/core/time.ts';
 	import Pill from '$lib/components/Pill.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 
-	const wall = $derived(
-		app.feedback
-			.filter((f) => f.status === 'Resolved' && !isConfidential(f) && f.responses.length > 0)
-			.sort((a, b) => (b.resolvedAt ?? b.updatedAt) - (a.resolvedAt ?? a.updatedAt))
-	);
+	// Served by the API, already filtered to resolved, non-confidential items.
+	const wall = $derived([...app.wall].sort((a, b) => (b.resolvedAt ?? b.updatedAt) - (a.resolvedAt ?? a.updatedAt)));
 </script>
 
 <svelte:head><title>You said, we did - VoiceBox</title></svelte:head>

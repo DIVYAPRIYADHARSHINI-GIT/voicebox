@@ -20,7 +20,7 @@
 		<div class="panel-pop" role="region" aria-label="Notifications" data-testid="bell-panel">
 			<div class="head">
 				<strong>Notifications</strong>
-				<button class="btn sm ghost" onclick={() => app.markAllNotificationsRead()} data-testid="mark-all-read">Mark all read</button>
+				<button class="btn sm ghost" onclick={() => void app.markAllNotificationsRead()} data-testid="mark-all-read">Mark all read</button>
 			</div>
 			{#if items.length === 0}
 				<p class="empty caption" style="padding:var(--s-5)">Nothing yet. You will be notified when your feedback changes status or gets a response.</p>
@@ -28,7 +28,7 @@
 				<ul>
 					{#each items as n (n.id)}
 						<li class:unread={!n.read}>
-							<a href={n.href} onclick={() => { app.markNotificationRead(n.id); open = false; }}>
+							<a href={n.href} onclick={() => { void app.markNotificationRead(n.id); open = false; }}>
 								<span class="kind"><Icon name={n.kind === 'overdue' ? 'warn' : n.kind === 'pulse' ? 'pulse' : n.kind === 'assigned' ? 'user' : 'inbox'} size={14} /></span>
 								<span class="text">
 									{n.text}
@@ -40,7 +40,7 @@
 					{/each}
 				</ul>
 			{/if}
-			<p class="foot caption">In-app only: there is no server in demo mode, so VoiceBox cannot send email or push notifications.</p>
+			<p class="foot caption">In-app only: VoiceBox does not send email or push notifications.</p>
 		</div>
 	{/if}
 </div>

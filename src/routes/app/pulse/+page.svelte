@@ -5,25 +5,32 @@
 	import { app } from '$lib/app.svelte.ts';
 	import Icon from '$lib/components/Icon.svelte';
 
-	const questions = $derived(app.settings.pulseQuestions);
+	const questions = $derived(app.pulseQuestions.length ? app.pulseQuestions : app.settings.pulseQuestions);
 	const answered = $derived(app.ready && app.hasAnsweredPulse());
 
 	let scores = $state<Record<string, number>>({});
 	let comment = $state('');
 	let error = $state('');
 	let justSent = $state(false);
+	let busy = $state(false);
 
 	const required = $derived(questions.filter((q) => q.kind !== 'comment'));
 	const complete = $derived(required.every((q) => Number.isFinite(scores[q.id])));
 
-	function submit(e: SubmitEvent) {
+	async function submit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!complete) {
 			error = 'Please answer every scored question.';
 			return;
 		}
 		error = '';
-		app.submitPulse(scores, comment);
+		busy = true;
+		const res = await app.submitPulse(scores, comment);
+		busy = false;
+		if (!res.ok) {
+			error = res.error ?? 'Could not record your response.';
+			return;
+		}
 		justSent = true;
 		app.toast('Pulse response recorded anonymously.', 'success');
 	}
@@ -52,7 +59,7 @@
 		</div>
 	</div>
 {:else}
-	<form class="card" onsubmit={submit} data-testid="pulse-form">
+	<form class="card" onsubmit={(e) => void submit(e)} data-testid="pulse-form">
 		{#each questions as q (q.id)}
 			{#if q.kind === 'scale5'}
 				<fieldset class="q">
@@ -90,7 +97,7 @@
 		{/each}
 
 		{#if error}<p class="error-text" role="alert" data-testid="pulse-error">{error}</p>{/if}
-		<button class="btn primary" type="submit" data-testid="pulse-submit">Send anonymously</button>
+		<button class="btn primary" type="submit" disabled={busy} data-testid="pulse-submit">{busy ? 'Sending...' : 'Send anonymously'}</button>
 	</form>
 {/if}
 

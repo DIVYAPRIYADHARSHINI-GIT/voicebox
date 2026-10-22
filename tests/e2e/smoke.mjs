@@ -60,6 +60,18 @@ async function freshPage({ width = 1440, height = 900, mobile = false, clear = t
     window.__clip = '';
     try { Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t) => { window.__clip = t; } }, configurable: true }); } catch (e) {}
     window.__beat = 0; setInterval(() => { window.__beat++; }, 50);
+    // Toasts auto-dismiss after ~4s; record them so assertions never race it.
+    window.__toasts = [];
+    // The init script runs before the document body exists, so poll instead of
+    // observing a node that is not there yet.
+    setInterval(() => {
+      const el = document.querySelector('[data-testid=toasts]');
+      if (!el) return;
+      for (const t of el.querySelectorAll('.toast')) {
+        const text = (t.innerText || '').trim();
+        if (text && !window.__toasts.includes(text)) window.__toasts.push(text);
+      }
+    }, 120);
   `);
 	await p.setDownloadDir(DL);
 	tracked.add(p);
@@ -228,8 +240,8 @@ await step('guard: an employee cannot open /manager pages', async () => {
 		const where = await path_(emp);
 		check(`guard: ${route} redirects an employee`, where === '/app', `landed on ${where}`);
 	}
-	const msg = (await emp.text('[data-testid=toasts]')) ?? '';
-	check('guard: the employee is told why', /manager portal/i.test(msg), msg.slice(0, 80));
+	const toasts = (await emp.eval('window.__toasts')) ?? [];
+	check('guard: the employee is told why', toasts.some((t) => /manager portal/i.test(t)), toasts.join(' | ').slice(0, 110));
 });
 
 // ===========================================================================
@@ -829,7 +841,7 @@ await step('backup: import restores data in another browser profile', async () =
 	await nav(other, '/manager/reports');
 	await other.setFile('[data-testid=import-backup]', 'backup.json', dl.bytes.toString('utf8'), 'application/json');
 	await sleep(1200);
-	const toast = (await other.text('[data-testid=toasts]')) ?? '';
+	const toast = ((await other.eval('window.__toasts')) ?? []).join(' | ');
 	check('backup: import reports success', /imported/i.test(toast), toast.slice(0, 90));
 	await nav(other, '/manager');
 	check('backup: imported data is visible', (await other.count('[data-testid=inbox-row]')) > 0);
@@ -877,7 +889,7 @@ await step('settings: admin can edit the configuration', async () => {
 	await hr.fill('[data-testid=sla-resolve-Critical]', '2');
 	await hr.click('[data-testid=save-settings]');
 	await sleep(500);
-	const toast = (await hr.text('[data-testid=toasts]')) ?? '';
+	const toast = ((await hr.eval('window.__toasts')) ?? []).join(' | ');
 	check('settings: saving works', /saved/i.test(toast), toast.slice(0, 60));
 	await shot(hr, 'z5-settings', true);
 	noErrors(hr, 'settings');

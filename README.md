@@ -9,7 +9,7 @@ Everything runs on free tiers with **no database, no API keys and no paid servic
 
 ## Live demo
 
-- **Live site:** https://voicebox-swart.vercel.app
+- **Live site:** https://voicebox-lemon.vercel.app
 - **Repository:** https://github.com/DIVYAPRIYADHARSHINI-GIT/voicebox
 
 Sign in with any demo account below. The app opens with sample data on first launch.

@@ -1,0 +1,31 @@
+{
+  "name": "voicebox",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "VoiceBox - Speak up. See it through. Professional office feedback system: employees share named or anonymous feedback, managers triage it in their own portal.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "node --test tests/unit/*.test.ts",
+    "e2e": "node tests/e2e/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "@fontsource/inter": "5.2.5",
+    "@fontsource/jetbrains-mono": "5.2.5",
+    "@sveltejs/adapter-vercel": "6.3.4",
+    "@sveltejs/kit": "2.70.3",
+    "@sveltejs/vite-plugin-svelte": "6.2.4",
+    "@types/node": "24.19.2",
+    "svelte": "5.57.2",
+    "svelte-check": "4.7.7",
+    "typescript": "5.9.3",
+    "vite": "7.3.7"
+  }
+}

@@ -68,11 +68,8 @@ export async function launch({ port = 9333 } = {}) {
         await browser.send("Browser.close");
       } catch {}
       proc.kill();
-      await sleep(500);
-      // Best-effort: Chrome can still be releasing files in the profile dir.
-      try {
-        rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-      } catch {}
+      await sleep(300);
+      rmSync(profile, { recursive: true, force: true });
     },
   };
 }
@@ -188,8 +185,8 @@ function makePage(c, targetId, browser, browserContextId) {
         await sleep(150);
       }
     },
-    async eval(expr, timeoutMs = 8000) {
-      const r = await c.send("Runtime.evaluate", { expression: `(async () => (${expr}))()`, awaitPromise: true, returnByValue: true }, timeoutMs);
+    async eval(expr) {
+      const r = await c.send("Runtime.evaluate", { expression: `(async () => (${expr}))()`, awaitPromise: true, returnByValue: true });
       if (r.exceptionDetails) throw new Error(`eval failed: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}\n${expr}`);
       return r.result.value;
     },

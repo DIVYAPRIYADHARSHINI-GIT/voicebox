@@ -2,7 +2,6 @@
 	// Track by code: anyone with the code can see status and public responses,
 	// without signing in. Internal notes are never shown here.
 	import { app } from '$lib/app.svelte.ts';
-	import { api } from '$lib/api.ts';
 	import { isValidTrackingCode } from '$lib/core/rules.ts';
 	import { formatDate, formatDateTime } from '$lib/core/time.ts';
 	import type { Feedback } from '$lib/core/types.ts';
@@ -14,9 +13,8 @@
 	let result = $state<Feedback | null>(null);
 	let error = $state('');
 	let searched = $state(false);
-	let busy = $state(false);
 
-	async function lookup(e: SubmitEvent) {
+	function lookup(e: SubmitEvent) {
 		e.preventDefault();
 		searched = true;
 		error = '';
@@ -25,15 +23,12 @@
 			error = 'A tracking code is 10 characters. Check the code and try again.';
 			return;
 		}
-		// Looked up on the server, so a code issued on a phone resolves here.
-		busy = true;
-		const res = await api.track(code);
-		busy = false;
-		if (!res.ok) {
-			error = res.error;
+		const found = app.findByCode(code);
+		if (!found) {
+			error = 'No feedback was found for that code in this browser. Codes cannot be recovered, and demo data is stored per browser.';
 			return;
 		}
-		result = res.item as unknown as Feedback;
+		result = found;
 	}
 </script>
 
@@ -59,7 +54,7 @@
 			public responses. No sign-in required.
 		</p>
 
-		<form class="card" onsubmit={(e) => void lookup(e)} data-testid="track-form">
+		<form class="card" onsubmit={lookup} data-testid="track-form">
 			<div class="field" style="margin-bottom:var(--s-3)">
 				<label for="code">Tracking code</label>
 				<input
@@ -76,7 +71,7 @@
 				/>
 			</div>
 			{#if error}<p class="error-text" role="alert" data-testid="track-error" style="margin:0 0 var(--s-3)">{error}</p>{/if}
-			<button class="btn primary" type="submit" disabled={busy} data-testid="track-submit">{busy ? 'Checking...' : 'Check status'}</button>
+			<button class="btn primary" type="submit" data-testid="track-submit">Check status</button>
 		</form>
 
 		{#if result}

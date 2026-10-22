@@ -21,7 +21,6 @@
 	let bulkStatus = $state<Status>('Under review');
 	let bulkOwner = $state('');
 	let bulkTag = $state('');
-	let bulkBusy = $state(false);
 
 	const scoped = $derived(app.scopedFeedback);
 	const filtered = $derived(
@@ -51,23 +50,21 @@
 
 	function openRow(itemId: string) {
 		openId = itemId;
-		void app.markRead(itemId, true);
+		app.markRead(itemId, true);
 	}
 
 	function toggleSelect(itemId: string, checked: boolean) {
 		selected = checked ? [...selected, itemId] : selected.filter((x) => x !== itemId);
 	}
 
-	async function runBulk() {
+	function runBulk() {
 		const action =
 			bulkKind === 'status'
 				? ({ kind: 'status', value: bulkStatus, reason: 'Bulk update from the inbox' } as const)
 				: bulkKind === 'owner'
 					? ({ kind: 'owner', value: bulkOwner } as const)
 					: ({ kind: 'tag', value: bulkTag } as const);
-		bulkBusy = true;
-		const n = await app.bulk(selected, action);
-		bulkBusy = false;
+		const n = app.bulk(selected, action);
 		bulkOpen = false;
 		selected = [];
 		app.toast(`${n} item(s) updated.`, 'success');
@@ -249,7 +246,7 @@
 	{/if}
 	{#snippet footer()}
 		<button class="btn" onclick={() => (bulkOpen = false)}>Cancel</button>
-		<button class="btn primary" onclick={() => void runBulk()} disabled={bulkBusy} data-testid="bulk-apply">{bulkBusy ? 'Applying...' : 'Apply'}</button>
+		<button class="btn primary" onclick={runBulk} data-testid="bulk-apply">Apply</button>
 	{/snippet}
 </Modal>
 

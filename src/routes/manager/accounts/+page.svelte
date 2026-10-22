@@ -5,8 +5,7 @@
 	import { checkPassword } from '$lib/core/password.ts';
 	import { emailLooksValid } from '$lib/core/rules.ts';
 	import { formatDate } from '$lib/core/time.ts';
-	import type { Role } from '$lib/core/types.ts';
-	import { api, type SafeAccount } from '$lib/api.ts';
+	import type { Account, Role } from '$lib/core/types.ts';
 	import Icon from '$lib/components/Icon.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -21,33 +20,13 @@
 	let error = $state('');
 	let busy = $state(false);
 
-	let resetFor = $state<SafeAccount | null>(null);
+	let resetFor = $state<Account | null>(null);
 	let resetPw = $state('');
-	let deactivate = $state<SafeAccount | null>(null);
+	let deactivate = $state<Account | null>(null);
 	let search = $state('');
 
-	// Loaded from the server: accounts are shared, so this is the real list for
-	// the whole organisation, not a per-browser copy.
-	let all = $state<SafeAccount[]>([]);
-	let loading = $state(true);
-
-	async function reload() {
-		loading = true;
-		const res = await api.accounts();
-		loading = false;
-		if (!res.ok) {
-			app.toast(res.error, 'error');
-			return;
-		}
-		all = res.accounts;
-	}
-
-	$effect(() => {
-		if (app.isAdmin) void reload();
-	});
-
 	const accounts = $derived(
-		all
+		app.db.accounts
 			.filter((a) => `${a.name} ${a.email} ${a.department}`.toLowerCase().includes(search.trim().toLowerCase()))
 			.sort((x, y) => x.role.localeCompare(y.role) || x.name.localeCompare(y.name))
 	);
@@ -72,7 +51,7 @@
 			return;
 		}
 		busy = true;
-		const res = await api.createAccount({ name, email, password, role, department, title });
+		const res = await app.createAccount({ name, email, password, role, department, title });
 		busy = false;
 		if (!res.ok) {
 			error = res.error ?? 'Could not create the account.';
@@ -80,8 +59,7 @@
 		}
 		createOpen = false;
 		name = email = password = title = '';
-		await reload();
-		app.toast('Account created. The person can sign in from any device.', 'success');
+		app.toast('Account created.', 'success');
 	}
 
 	async function doReset() {
@@ -91,29 +69,10 @@
 			app.toast(pw.message, 'error');
 			return;
 		}
-		const res = await api.resetPassword(resetFor.id, resetPw);
-		if (!res.ok) {
-			app.toast(res.error, 'error');
-			return;
-		}
+		await app.resetPassword(resetFor.id, resetPw);
 		app.toast(`Password reset for ${resetFor.name}. Share the new password securely.`, 'success');
 		resetFor = null;
 		resetPw = '';
-		await reload();
-	}
-
-	async function activate(account: SafeAccount) {
-		const res = await api.setAccountActive(account.id, true);
-		app.toast(res.ok ? 'Account activated.' : res.error, res.ok ? 'success' : 'error');
-		await reload();
-	}
-
-	async function doDeactivate() {
-		if (!deactivate) return;
-		const res = await api.setAccountActive(deactivate.id, false);
-		app.toast(res.ok ? 'Account deactivated.' : res.error, res.ok ? 'success' : 'error');
-		deactivate = null;
-		await reload();
 	}
 
 	const roleLabel = (r: Role) => (r === 'admin' ? 'Admin/HR' : r === 'manager' ? 'Manager' : 'Employee');
@@ -125,7 +84,8 @@
 	<div>
 		<h1 data-testid="page-title">Accounts</h1>
 		<p style="margin:var(--s-2) 0 0">
-			{all.length} accounts, shared across every device. Passwords are PBKDF2-hashed and verified on the server.
+			{app.db.accounts.length} accounts in this browser. Demo authentication only: passwords are PBKDF2-hashed in local
+			storage, which is not a substitute for server-side authentication.
 		</p>
 	</div>
 	<button class="btn primary" onclick={() => (createOpen = true)} data-testid="create-account"><Icon name="plus" size={15} /> Create account</button>
@@ -157,7 +117,7 @@
 						<div class="row" style="gap:4px; flex-wrap:nowrap">
 							<button class="btn sm ghost" onclick={() => { resetFor = a; resetPw = ''; }} data-testid="reset-password">Reset</button>
 							{#if a.id !== app.account?.id}
-								<button class="btn sm ghost" onclick={() => (a.active ? (deactivate = a) : void activate(a))} data-testid="toggle-active">
+								<button class="btn sm ghost" onclick={() => (a.active ? (deactivate = a) : app.setAccountActive(a.id, true))} data-testid="toggle-active">
 									{a.active ? 'Deactivate' : 'Activate'}
 								</button>
 							{/if}
@@ -193,7 +153,7 @@
 	{#if error}<p class="error-text" role="alert" data-testid="account-error">{error}</p>{/if}
 	{#snippet footer()}
 		<button class="btn" onclick={() => (createOpen = false)}>Cancel</button>
-		<button class="btn primary" onclick={() => void create()} disabled={busy} data-testid="save-account">{busy ? 'Creating...' : 'Create account'}</button>
+		<button class="btn primary" onclick={create} disabled={busy} data-testid="save-account">{busy ? 'Creating...' : 'Create account'}</button>
 	{/snippet}
 </Modal>
 
@@ -202,7 +162,7 @@
 	<p class="caption">The person is marked as needing a password change, and can set their own from the profile menu.</p>
 	{#snippet footer()}
 		<button class="btn" onclick={() => (resetFor = null)}>Cancel</button>
-		<button class="btn primary" onclick={() => void doReset()} data-testid="reset-confirm">Reset password</button>
+		<button class="btn primary" onclick={doReset} data-testid="reset-confirm">Reset password</button>
 	{/snippet}
 </Modal>
 
@@ -212,7 +172,7 @@
 	message={deactivate ? `${deactivate.name} will no longer be able to sign in. Their feedback and history stay in place.` : ''}
 	confirmLabel="Deactivate"
 	danger
-	onconfirm={() => void doDeactivate()}
+	onconfirm={() => { if (deactivate) { app.setAccountActive(deactivate.id, false); app.toast('Account deactivated.', 'info'); deactivate = null; } }}
 	oncancel={() => (deactivate = null)}
 	testid="deactivate-dialog"
 />

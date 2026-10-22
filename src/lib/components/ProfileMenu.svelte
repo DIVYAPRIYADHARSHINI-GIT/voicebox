@@ -30,7 +30,7 @@
 			return;
 		}
 		busy = true;
-		const res = await app.changePassword(current, next);
+		const res = await app.changePassword(app.account!.id, current, next);
 		busy = false;
 		if (!res.ok) {
 			error = res.error ?? 'Could not change the password.';
@@ -41,10 +41,10 @@
 		app.toast('Password changed.', 'success');
 	}
 
-	async function signOut() {
-		await app.signOut();
+	function signOut() {
+		app.signOut();
 		app.toast('You have been signed out.', 'info');
-		await goto(portal === 'manager' ? '/manager/login' : '/login');
+		void goto(portal === 'manager' ? '/manager/login' : '/login');
 	}
 </script>
 
@@ -71,7 +71,7 @@
 	{/if}
 </div>
 
-<Modal open={pwOpen} title="Change password" description="Verified and stored on the server, hashed with PBKDF2." onclose={() => (pwOpen = false)} testid="change-password-dialog">
+<Modal open={pwOpen} title="Change password" description="Passwords are hashed with PBKDF2 in this browser." onclose={() => (pwOpen = false)} testid="change-password-dialog">
 	<div class="field">
 		<label for="cur-pw">Current password</label>
 		<input id="cur-pw" class="input" type={show ? 'text' : 'password'} bind:value={current} data-testid="current-password" autocomplete="current-password" />

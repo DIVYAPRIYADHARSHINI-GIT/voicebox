@@ -9,18 +9,17 @@
 <div class="demo-badge" data-testid="demo-badge">
 	<button class="pillbtn" onclick={() => (expanded = !expanded)} aria-expanded={expanded} aria-label="About demo mode">
 		<Icon name="info" size={14} />
-		<span>Demo mode: shared demo data, open to everyone</span>
+		<span>Demo mode: data is stored only in this browser</span>
 	</button>
 	{#if expanded}
 		<div class="pop" role="note">
 			<p>
-				Feedback, pulse answers and accounts are stored on the server and shared across every device: raise a ticket on a
-				phone and it appears in the manager portal on a laptop straight away.
+				VoiceBox runs with no database and no server-side accounts. Feedback, pulse answers and sign-ins are saved in this
+				browser's local storage only. Another browser, another device or a cleared cache starts from scratch.
 			</p>
 			<p style="margin-bottom:0">
-				This is still a <strong>public demo</strong> with published sign-in details, so anyone can read and change the data.
-				Do not put anything confidential in it.
-				{#if app.connectionError}<br /><strong>Connection:</strong> {app.connectionError}{/if}
+				Use <strong>JSON backup</strong> in Settings to move data between browsers.
+				{#if !app.storeStatus.available}<br /><strong>Storage warning:</strong> {app.storeStatus.message}{/if}
 			</p>
 			<a href="/about">Read the privacy notes</a>
 		</div>

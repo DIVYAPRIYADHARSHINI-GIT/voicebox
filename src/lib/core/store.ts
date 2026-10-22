@@ -1,28 +1,135 @@
 // FeedbackStore: the single data-access seam for the whole app.
 //
-// HISTORY / WHY THIS CHANGED
-// The first version had one implementation backed by localStorage. That made
-// the data per-browser: a ticket raised on a phone was invisible to a manager
-// on a laptop, because the two devices had entirely separate datasets. A
-// feedback system has to be shared, so the live implementation is now
-// `ApiFeedbackStore` (src/lib/api.ts), which talks to the SvelteKit server
-// routes backed by Vercel Blob.
-//
-// This module keeps the shared types and the `migrate()` normaliser used by
-// both the server (reading the blob) and backup import.
-import type { Database, Feedback, Notification, PulseResponse, Settings } from './types.ts';
+// There is exactly one implementation today (LocalFeedbackStore, backed by
+// localStorage) so VoiceBox runs on Vercel Hobby with no database and no keys.
+// A hosted database could later implement the same interface without touching
+// any page code. No database is implemented now, on purpose.
+import type { Database, Feedback, Notification, PulseResponse, Session, Settings } from './types.ts';
 
 export interface StoreStatus {
-	/** False when the shared store is unreachable or not configured. */
+	/** False when localStorage is unavailable (private mode, blocked, full). */
 	available: boolean;
 	message?: string;
 }
 
-/**
- * Fills in anything a newer version added, so an old backup still loads, and
- * normalises every record defensively. Used on the server when reading the
- * shared blob and when importing a backup.
- */
+export interface FeedbackStore {
+	readonly kind: 'local';
+	status(): StoreStatus;
+	/** Full database document (always returns a usable value, even on failure). */
+	read(): Database;
+	write(db: Database): StoreStatus;
+	update(fn: (db: Database) => void): StoreStatus;
+	session(): Session | null;
+	setSession(s: Session | null): void;
+	clearAll(): void;
+}
+
+const DB_KEY = 'voicebox.db.v1';
+const SESSION_KEY = 'voicebox.session.v1';
+
+function safeLocalStorage(): Storage | null {
+	try {
+		const ls = globalThis.localStorage;
+		if (!ls) return null;
+		const probe = '__vb_probe__';
+		ls.setItem(probe, '1');
+		ls.removeItem(probe);
+		return ls;
+	} catch {
+		return null;
+	}
+}
+
+export class LocalFeedbackStore implements FeedbackStore {
+	readonly kind = 'local' as const;
+	private ls: Storage | null;
+	private lastError?: string;
+	/** In-memory fallback so the app still works (for this tab) without storage. */
+	private memory: Database | null = null;
+	private memorySession: Session | null = null;
+
+	constructor(private makeEmpty: () => Database) {
+		this.ls = safeLocalStorage();
+		if (!this.ls) this.lastError = 'This browser blocked local storage, so changes will be lost when you close the tab.';
+	}
+
+	status(): StoreStatus {
+		return { available: Boolean(this.ls) && !this.lastError, message: this.lastError };
+	}
+
+	read(): Database {
+		if (!this.ls) return (this.memory ??= this.makeEmpty());
+		try {
+			const raw = this.ls.getItem(DB_KEY);
+			if (!raw) return this.makeEmpty();
+			const parsed = JSON.parse(raw) as Database;
+			return migrate(parsed, this.makeEmpty());
+		} catch (e) {
+			this.lastError = 'Saved data could not be read, so VoiceBox started from a fresh copy.';
+			console.warn('VoiceBox: could not read saved data', e);
+			return this.makeEmpty();
+		}
+	}
+
+	write(db: Database): StoreStatus {
+		if (!this.ls) {
+			this.memory = db;
+			return this.status();
+		}
+		try {
+			this.ls.setItem(DB_KEY, JSON.stringify(db));
+			this.lastError = undefined;
+		} catch (e) {
+			const quota = e instanceof DOMException && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED');
+			this.lastError = quota
+				? 'Browser storage is full. Export a JSON backup and use "Start fresh" to free space.'
+				: 'Changes could not be saved to this browser.';
+			console.warn('VoiceBox: could not save data', e);
+		}
+		return this.status();
+	}
+
+	update(fn: (db: Database) => void): StoreStatus {
+		const db = this.read();
+		fn(db);
+		return this.write(db);
+	}
+
+	session(): Session | null {
+		if (!this.ls) return this.memorySession;
+		try {
+			const raw = this.ls.getItem(SESSION_KEY);
+			return raw ? (JSON.parse(raw) as Session) : null;
+		} catch {
+			return null;
+		}
+	}
+
+	setSession(s: Session | null): void {
+		this.memorySession = s;
+		if (!this.ls) return;
+		try {
+			if (s) this.ls.setItem(SESSION_KEY, JSON.stringify(s));
+			else this.ls.removeItem(SESSION_KEY);
+		} catch (e) {
+			console.warn('VoiceBox: could not save the session', e);
+		}
+	}
+
+	clearAll(): void {
+		this.memory = null;
+		this.memorySession = null;
+		if (!this.ls) return;
+		try {
+			this.ls.removeItem(DB_KEY);
+			this.ls.removeItem(SESSION_KEY);
+		} catch (e) {
+			console.warn('VoiceBox: could not clear saved data', e);
+		}
+	}
+}
+
+/** Fills in anything a newer version added, so an old backup still loads. */
 export function migrate(db: Partial<Database>, empty: Database): Database {
 	const settings: Settings = { ...empty.settings, ...(db.settings ?? {}) };
 	settings.sla = { ...empty.settings.sla, ...(db.settings?.sla ?? {}) };
@@ -42,7 +149,7 @@ export function migrate(db: Partial<Database>, empty: Database): Database {
 	};
 }
 
-export function normalizeFeedback(f: Feedback): Feedback {
+function normalizeFeedback(f: Feedback): Feedback {
 	// Explicit fallbacks, not a spread of defaults: a key present with the value
 	// `undefined` (common in hand-edited or older backups) would overwrite a
 	// default and crash every `.length` / `.map` in the UI.

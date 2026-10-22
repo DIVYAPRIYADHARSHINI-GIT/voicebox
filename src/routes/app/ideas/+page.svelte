@@ -2,7 +2,7 @@
 	// Public ideas board: upvote once (toggle), comment, sort by top or newest.
 	// Confidential reports and concerns about individuals are never listed.
 	import { app } from '$lib/app.svelte.ts';
-	import { COMMENT_MAX } from '$lib/core/rules.ts';
+	import { publicIdeas, COMMENT_MAX } from '$lib/core/rules.ts';
 	import { formatDate, relative } from '$lib/core/time.ts';
 	import Pill from '$lib/components/Pill.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -12,14 +12,13 @@
 	let draft = $state('');
 
 	const ideas = $derived(
-		[...app.ideas].sort((a, b) => (sort === 'top' ? b.upvotes.length - a.upvotes.length || b.createdAt - a.createdAt : b.createdAt - a.createdAt))
+		publicIdeas(app.feedback).sort((a, b) => (sort === 'top' ? b.upvotes.length - a.upvotes.length || b.createdAt - a.createdAt : b.createdAt - a.createdAt))
 	);
 
-	async function comment(itemId: string) {
+	function comment(itemId: string) {
 		if (!draft.trim()) return;
-		const text = draft;
+		app.addComment(itemId, draft);
 		draft = '';
-		await app.addComment(itemId, text);
 		app.toast('Comment added.', 'success');
 	}
 </script>
@@ -49,7 +48,7 @@
 					<button
 						class="vote"
 						class:voted={app.hasUpvoted(item)}
-						onclick={() => void app.toggleUpvote(item.id)}
+						onclick={() => app.toggleUpvote(item.id)}
 						aria-pressed={app.hasUpvoted(item)}
 						aria-label="{app.hasUpvoted(item) ? 'Remove your upvote from' : 'Upvote'} {item.title}"
 						data-testid="upvote-{item.id}"
@@ -101,7 +100,7 @@
 									aria-label="Comment on {item.title}"
 									data-testid="comment-input"
 								/>
-								<button class="btn sm primary" onclick={() => void comment(item.id)} data-testid="comment-submit">Post</button>
+								<button class="btn sm primary" onclick={() => comment(item.id)} data-testid="comment-submit">Post</button>
 							</div>
 						</div>
 					{/if}

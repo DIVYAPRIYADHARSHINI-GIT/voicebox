@@ -5,9 +5,19 @@
 // a CSV file or a PDF.
 import { app } from './app.svelte.ts';
 import type { Feedback } from './core/types.ts';
-import { THRESHOLD_MESSAGE, isConfidential, isOverdue, submitterLabel } from './core/rules.ts';
+import { THRESHOLD_MESSAGE, enps, isConfidential, isOverdue, submitterLabel } from './core/rules.ts';
 import { formatDate, formatDateTime, isoDate, isoMonth, weekKey } from './core/time.ts';
-import { RANGES, byCategory, byStatus, computeKpis, inRange, topThemes, type RangeKey } from './core/stats.ts';
+import {
+	RANGES,
+	byCategory,
+	byStatus,
+	computeKpis,
+	inRange,
+	pulseByDepartment,
+	summarizePulse,
+	topThemes,
+	type RangeKey
+} from './core/stats.ts';
 import { STATUSES } from './core/types.ts';
 import type { ReportItem, ReportRequest } from './report/build.ts';
 import type { CsvFeedbackRow, CsvPulseRow } from './report/csv.ts';
@@ -54,11 +64,10 @@ function toReportItem(f: Feedback): ReportItem {
 
 export function buildReportRequest(range: RangeKey, includeConfidential: boolean): ReportRequest {
 	const items = exportableItems(range, includeConfidential);
-	// Pulse figures are computed server-side (the client never receives raw
-	// responses), so the report reuses that aggregate.
-	const agg = app.pulseResults;
-	const summary = agg?.overall ?? null;
-	const kpis = computeKpis(items, [], app.settings);
+	const pulseRows = app.isAdmin ? app.db.pulse : app.db.pulse.filter((p) => p.department === app.account?.department);
+	const kpis = computeKpis(items, pulseRows, app.settings);
+	const summary = summarizePulse(pulseRows, app.settings);
+	const departments = app.isAdmin ? app.settings.departments : [app.account?.department ?? ''];
 
 	const topIssues = items
 		.filter((f) => f.status !== 'Resolved' && f.status !== 'Declined')
@@ -83,25 +92,26 @@ export function buildReportRequest(range: RangeKey, includeConfidential: boolean
 		includesConfidential: includeConfidential && app.isAdmin,
 		kpis: {
 			...kpis,
-			enps: summary?.shown ? summary.enps.score : null,
-			enpsResponses: summary?.responses ?? 0
+			enps: summary.shown ? kpis.enps : null
 		},
 		categories: byCategory(items).map((c) => ({ label: c.label, value: c.value })),
 		statuses: byStatus(items, STATUSES).map((s) => ({ label: s.label, value: s.value })),
 		topIssues,
 		resolved,
 		pulse: {
-			responses: summary?.responses ?? 0,
-			thresholdMet: Boolean(summary?.shown),
+			responses: summary.responses,
+			thresholdMet: summary.shown,
 			thresholdMessage: THRESHOLD_MESSAGE,
-			enps: summary?.enps.score ?? 0,
-			scores: (summary?.scores ?? []).map((s) => ({ text: s.text, average: s.average })),
-			departments: (agg?.byDepartment ?? []).map((d) => ({
+			enps: summary.enps.score,
+			scores: summary.scores.map((s) => ({ text: s.text, average: s.average })),
+			departments: pulseByDepartment(pulseRows, app.settings, departments).map((d) => ({
 				department: d.department,
-				responses: d.responses,
-				shown: d.shown,
-				average: d.shown ? Math.round((d.scores.reduce((sum, x) => sum + (x.average ?? 0), 0) / Math.max(d.scores.length, 1)) * 10) / 10 : null,
-				enps: d.shown ? (d.enps?.score ?? null) : null
+				responses: d.summary.responses,
+				shown: d.summary.shown,
+				average: d.summary.shown
+					? Math.round((d.summary.scores.reduce((s, x) => s + (x.average ?? 0), 0) / Math.max(d.summary.scores.length, 1)) * 10) / 10
+					: null,
+				enps: d.summary.shown ? d.summary.enps.score : null
 			}))
 		},
 		themes: topThemes(items, 10)
@@ -148,22 +158,30 @@ export function feedbackCsvRows(range: RangeKey, includeConfidential: boolean): 
 	}));
 }
 
-/**
- * Pulse CSV from the server aggregate. Groups below the anonymity threshold are
- * exported as the protective message, never as numbers.
- */
 export function pulseCsvRows(): CsvPulseRow[] {
-	const agg = app.pulseResults;
-	if (!agg) return [];
-	const week = agg.overall.trend.at(-1)?.key ?? currentWeek();
-	return agg.byDepartment.map((d) => ({
-		week,
-		department: d.department,
-		responses: d.responses,
-		average: d.shown ? Math.round((d.scores.reduce((sum, x) => sum + (x.average ?? 0), 0) / Math.max(d.scores.length, 1)) * 10) / 10 : null,
-		enps: d.shown ? (d.enps?.score ?? null) : null,
-		note: d.shown ? '' : THRESHOLD_MESSAGE
-	}));
+	const rows = app.isAdmin ? app.db.pulse : app.db.pulse.filter((p) => p.department === app.account?.department);
+	const departments = app.isAdmin ? app.settings.departments : [app.account?.department ?? ''];
+	const weeks = [...new Set(rows.map((r) => r.week))].sort();
+	const out: CsvPulseRow[] = [];
+	for (const week of weeks) {
+		for (const department of departments) {
+			const group = rows.filter((r) => r.week === week && r.department === department);
+			if (group.length === 0) continue;
+			const summary = summarizePulse(group, app.settings);
+			out.push({
+				week,
+				department,
+				responses: group.length,
+				average: summary.shown
+					? Math.round((summary.scores.reduce((s, x) => s + (x.average ?? 0), 0) / Math.max(summary.scores.length, 1)) * 10) / 10
+					: null,
+				enps: summary.shown ? summary.enps.score : null,
+				// Small groups are reported as protected, never as numbers.
+				note: summary.shown ? '' : THRESHOLD_MESSAGE
+			});
+		}
+	}
+	return out;
 }
 
 export async function downloadCsv(kind: 'feedback' | 'pulse', range: RangeKey, includeConfidential: boolean): Promise<void> {
@@ -177,15 +195,12 @@ export async function downloadCsv(kind: 'feedback' | 'pulse', range: RangeKey, i
 	download(await res.blob(), fileName);
 }
 
-/** Backup is generated server-side so it covers the whole shared dataset. */
-export async function downloadBackup(): Promise<void> {
-	const res = await fetch('/api/admin/data', { credentials: 'same-origin' });
-	if (!res.ok) {
-		const err = (await res.json().catch(() => ({ error: 'Backup failed.' }))) as { error?: string };
-		throw new Error(err.error ?? 'Could not export the backup.');
-	}
-	download(await res.blob(), `VoiceBox_Backup_${isoDate(Date.now())}.json`);
+export function downloadBackup(): void {
+	download(new Blob([app.exportBackup()], { type: 'application/json' }), `VoiceBox_Backup_${isoDate(Date.now())}.json`);
 }
 
 /** Current week key, exposed for the UI. */
 export const currentWeek = () => weekKey(Date.now());
+
+/** eNPS re-export so pages do not import from two modules. */
+export { enps };

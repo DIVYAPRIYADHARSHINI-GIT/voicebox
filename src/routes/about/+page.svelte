@@ -74,17 +74,15 @@
 		</section>
 
 		<section class="card">
-			<h2><Icon name="shield" size={17} /> How sign-in works</h2>
+			<h2><Icon name="shield" size={17} /> Demo authentication is not secure</h2>
 			<p>
-				Sign-in is verified on the server. Passwords are hashed with PBKDF2-SHA256 (120,000 iterations and a per-user
-				random salt) and only the hash is stored; the session is a signed, HttpOnly cookie the browser cannot read or
-				forge. The 5-attempt lockout, the 8-hour session expiry and the 15-minute inactivity sign-out are all enforced
-				server-side, and role checks happen in the database query rather than in the interface.
+				Sign-in is simulated in the browser. Passwords are hashed with Web Crypto PBKDF2-SHA256 (120,000 iterations and a
+				per-user random salt) before being written to local storage, so plain-text passwords are never stored. That is
+				still <strong>not secure authentication</strong>: there is no server to verify anything, the hash is readable by
+				anyone with access to the browser profile, and the 5-attempt lockout, 8-hour session expiry and 15-minute
+				inactivity sign-out are browser-side conveniences, not security controls.
 			</p>
-			<p>
-				It is still a <strong>demo</strong>, not a hardened deployment: the accounts are public, there is no email
-				verification or password-reset flow, no rate limiting beyond the lockout, and no audit log.
-			</p>
+			<p>Production use requires server-side authentication, session management and authorisation.</p>
 		</section>
 
 		<section class="card">

@@ -5,8 +5,7 @@
 A professional office feedback system. Employees share praise, concerns and ideas — named or anonymous — and can
 follow exactly what happens to them. Managers triage, respond and report in their own separate portal.
 
-Runs on free tiers (Vercel Hobby + Neon Postgres free plan) with no paid services and no API keys to manage.
-Data is **shared across every device**: raise a ticket on a phone and it appears in the manager portal on a laptop.
+Everything runs on free tiers with **no database, no API keys and no paid services**. All data lives in the browser.
 
 ## Live demo
 
@@ -100,8 +99,8 @@ Consequences, by design:
 
 **Limits you should know about in demo mode:**
 
-- This is a public demo with published sign-in details, so anyone can sign in as Admin/HR and read everything,
-  including items submitted anonymously. Do not put real feedback in it.
+- Data is stored unencrypted in the browser's local storage. Anyone with access to that browser profile can read it
+  with developer tools, including anonymous items.
 - Content can still identify someone. If a report describes a situation only one person could be in, the text itself
   is identifying — no system can fix that.
 - A production deployment needs a server, a database with access controls, audit logging and key management.
@@ -109,8 +108,7 @@ Consequences, by design:
 ### Pulse anonymity
 
 Pulse answers carry the department and nothing else. The "already responded this week" marker is stored in a
-**separate table** keyed by account + week, with no reference to the answer row, so an answer can never be traced
-back to a person - not even with full database access. Results for any group —
+**separate list** keyed by account + week, so an answer can never be traced back to a person. Results for any group —
 department, week, filter combination — with fewer than **5 responses** (editable in Settings) are replaced with
 _"Not enough responses to protect anonymity"_ in the UI, the PDF and the CSV.
 
@@ -122,59 +120,54 @@ policy, and requires a confirmation checkbox. These reports are visible to Admin
 excluded from manager views, and excluded from CSV export unless an Admin explicitly includes them and confirms a
 warning dialog. They carry a **Sensitive** badge and a warning before opening.
 
-## Authentication
+## Demo authentication is not secure
 
-Passwords are hashed with **PBKDF2-SHA256** (120,000 iterations, per-user random salt) and only the hash is stored.
-The session is a signed, HttpOnly cookie the browser cannot read or forge, and the lockout, session expiry and
-inactivity sign-out are all enforced server-side.
+Sign-in is simulated entirely in the browser. Passwords are hashed with Web Crypto **PBKDF2-SHA256** (120,000
+iterations, per-user random salt) before being written to local storage, so plain-text passwords are never stored.
+That is still **not secure authentication**:
 
-It is still a **demo**, not a hardened deployment: the accounts below are public, there is no email verification or
-password-reset flow, no rate limiting beyond the lockout, and no audit log. This is stated on the login pages and the
-About page as well as here.
+- there is no server to verify anything;
+- the hash is readable by anyone with access to the browser profile;
+- the 5-attempt / 5-minute lockout, the 8-hour session expiry and the 15-minute inactivity sign-out are browser-side
+  conveniences, not security controls.
 
-## Shared data, and why it works this way
+Production use requires server-side authentication, session management and authorisation. This is stated on both login
+pages and on the About/Privacy page as well as here.
 
-The first version of VoiceBox stored everything in `localStorage`. That satisfied a "no database" constraint, but it
-made the product wrong: `localStorage` is per-browser, so an employee submitting on their phone and a manager signing
-in on a laptop had two unrelated datasets, and tickets never reached the manager portal.
-
-A feedback system has to be shared, so the storage layer is now a real database:
+## Free-only design
 
 | Constraint | How it is met |
 | --- | --- |
-| Free tier only | Vercel Hobby + Neon Postgres free plan |
-| No API keys to manage | The database URL is injected by the Vercel integration |
-| Cross-device | One Postgres database behind SvelteKit server routes |
-| Access control | Scoping is a SQL `WHERE` clause, not a UI filter |
-| Data portability | Admin/HR can export a JSON backup and re-import it |
+| No database | All data is one JSON document in `localStorage`, behind the `FeedbackStore` interface |
+| No API keys | No third-party services at all |
+| No paid tiers | Vercel Hobby; two tiny serverless functions |
+| Server routes only where required | `/api/report` (PDF) and `/api/csv` (CSV); they receive data from the browser, render the file and keep nothing. `/api/health` is a liveness check. |
+| No heavy chart library | Every chart is hand-written SVG |
+| Data portability | JSON backup export/import, since data is per-browser |
 
-### An intermediate version got this wrong
+All data access goes through the `FeedbackStore` interface (`src/lib/core/store.ts`) with exactly one implementation,
+`LocalFeedbackStore`. A hosted database could implement the same interface later without touching any page code.
+**No database is implemented now, on purpose.** Every storage access is wrapped in try/catch and degrades gracefully
+when storage is full or unavailable (an in-memory fallback keeps the tab working, and the user is told).
 
-Before Postgres, the shared data lived in a single JSON blob in object storage. It worked, but every new ticket
-rewrote the entire ~500 KB document. That burned through the provider's monthly write allowance and got the store
-suspended mid-test. Object storage is the wrong tool for a write-heavy record store; a row per ticket is the right
-one. The `rev`-counter and in-process write lock that version needed are gone, replaced by ordinary SQL.
+### What browser-only storage means for a multi-device demo
 
-### Security consequences of sharing
+`localStorage` is scoped to one browser on one device, so this is a **single-device demo**:
 
-Once the data is shared, the browser can no longer be trusted to decide who sees what. These moved to the server:
+- An employee submitting on their phone and a manager signing in on a laptop have **two separate datasets**. A ticket
+  raised on one device does **not** appear in the manager portal on another.
+- To see the full employee -> manager -> response loop, use **one browser** and switch accounts (sign out, then sign
+  in on the other portal). The demo accounts share that browser's dataset.
+- `JSON backup export/import` in Settings is the supported way to move data between browsers.
+- A tracking code only resolves in the browser that created the item, because the item itself lives there.
 
-- **Sessions** - signed, HttpOnly cookies (HMAC-SHA256). The browser cannot read or forge one, and the account is
-  re-read on every request, so deactivating an account takes effect immediately.
-- **Password verification** - PBKDF2-SHA256 (120,000 iterations, per-user salt), checked server-side.
-- **The 5-attempt lockout** - counted in the database per email, so clearing browser storage cannot reset it.
-  Admin/HR can release a lockout from Settings, which real deployments need.
-- **Department scoping** - a manager's feed query filters by department and excludes confidential reports, so
-  restricted rows are never sent to the client at all. Per-item actions re-check access, so guessing an id fails
-  with `403`.
-- **Pulse anonymity** - answers carry the department only, and the "already answered" marker lives in a separate
-  table with no reference to the answer. Even full database access cannot link a person to their responses.
+This is a deliberate consequence of the no-database constraint, not a bug. Making feedback visible across devices
+requires shared server-side storage, which would mean adding a database.
 
 ## Tech stack
 
 - **SvelteKit 2** + **Svelte 5** (runes) + **TypeScript**
 - `@sveltejs/adapter-vercel` (runtime `nodejs22.x`)
-- **Neon Postgres** (free plan) via `@neondatabase/serverless`, with the schema created on first use
 - Inter + JetBrains Mono via `@fontsource` (tracking codes only use the monospace face)
 - Hand-written SVG charts, original SVG icon set, original line-art login illustrations
 - Dependency-free PDF writer (Helvetica core fonts with real AFM widths, wrapped tables with repeated headers, page
@@ -198,26 +191,13 @@ heartbeat in the e2e suite). Reactive effects never write the state they depend 
 
 ## Setup
 
-Requires Node.js 22.12 or newer and a Postgres connection string.
+Requires Node.js 22.12 or newer.
 
 ```bash
 cd voicebox
 npm install
-
-# Provision the free Neon database and pull its credentials (one-off):
-vercel link
-vercel integration add neon --name voicebox-db --plan free_v3 --non-interactive
-vercel env pull .env.local
-
 npm run dev          # http://localhost:5173
 ```
-
-The app needs two environment variables, both written to `.env.local` by the commands above:
-
-| Variable | Purpose |
-| --- | --- |
-| `DATABASE_URL` | Neon Postgres connection string (the schema is created on first use) |
-| `VOICEBOX_SESSION_SECRET` | HMAC key for signing session cookies |
 
 Other scripts:
 
@@ -234,12 +214,8 @@ Running the end-to-end suite:
 ```bash
 npm run build
 npx vite preview --port 4319 --strictPort &
-caffeinate -dims env BASE_URL=http://localhost:4319 node tests/e2e/cross-device.mjs   # the cross-device suite
-caffeinate -dims env BASE_URL=http://localhost:4319 node tests/e2e/smoke.mjs          # the full feature suite
+caffeinate -dims env BASE_URL=http://localhost:4319 node tests/e2e/smoke.mjs
 ```
-
-Both suites call `tests/e2e/reset-store.mjs` first. Because the lockout counter is now shared server-side, a previous
-run's failed logins would otherwise leave demo accounts locked for the next run.
 
 It uses the locally installed Google Chrome in headless mode (no npm dependencies), with short timeouts, a freeze
 heartbeat and a global watchdog so it fails fast instead of hanging. Screenshots are written to
@@ -247,12 +223,8 @@ heartbeat and a global watchdog so it fails fast instead of hanging. Screenshots
 
 ## Testing status
 
-- **133 unit tests** pass (`npm test`), including the signed-session and access-control layer
-- **33 cross-device checks** pass (`tests/e2e/cross-device.mjs`): each "device" is a separate browser context with
-  its own cookies and localStorage, proving a ticket raised on one device reaches the manager portal on another,
-  that the response comes back, that a tracking code resolves from a signed-out device, that another department's
-  manager sees none of it, and that six simultaneous submissions are all persisted
-- **End-to-end checks** pass against the production build, covering: employee sign-in success and failure, lockout
+- **122 unit tests** pass (`npm test`)
+- **230 end-to-end checks** pass against the production build, covering: employee sign-in success and failure, lockout
   after 5 failed attempts, submit named feedback, submit anonymous feedback and copy the code, track by code, manager
   sign-in, triage/assign/respond/decline, the employee seeing the response, upvoting an idea, answering a pulse survey,
   the anonymity threshold with too few responses, confidential reports visible only to Admin, the dashboard, PDF and
@@ -302,12 +274,6 @@ voicebox/
 │   │   │   ├── defaults.ts     # default settings
 │   │   │   └── seed.ts         # Northwind Studio sample data
 │   │   ├── report/         # PDF writer, CSV writer, payload validation
-│   │   ├── server/         # server-only: schema, queries, sessions, access control
-│   │   │   ├── schema.ts       # Postgres tables and indexes
-│   │   │   ├── db.ts           # every query (scoping lives here)
-│   │   │   ├── auth.ts         # signed session cookies + per-item access checks
-│   │   │   └── api.ts          # route guards, lockout, first-run seeding
-│   │   ├── api.ts          # typed client for the server routes
 │   │   ├── components/     # UI components (icons, charts, drawer, dialogs...)
 │   │   ├── app.svelte.ts   # central app state (Svelte 5 runes)
 │   │   └── exports.ts      # builds export payloads, applies anonymity rules

@@ -27,7 +27,6 @@
 	let confidentialAck = $state(false);
 	let errors = $state<Record<string, string>>({});
 	let submitted = $state<Feedback | null>(null);
-	let busy = $state(false);
 
 	// Prefill the department from the account (optional for anonymous).
 	$effect(() => {
@@ -40,8 +39,7 @@
 			? estimateSentiment(`${title} ${description}`, app.settings.sentimentPositive, app.settings.sentimentNegative)
 			: null
 	);
-	// Matched against the public ideas the server returned for this portal.
-	const similar = $derived(title.trim().length >= 8 ? findSimilar(app.ideas, title) : []);
+	const similar = $derived(title.trim().length >= 8 ? findSimilar(app.feedback, title) : []);
 	const publicAllowed = $derived(canBePublic({ category, type }));
 
 	$effect(() => {
@@ -51,9 +49,8 @@
 		}
 	});
 
-	async function submit(e: SubmitEvent) {
+	function submit(e: SubmitEvent) {
 		e.preventDefault();
-		if (busy) return;
 		const draft = { title, description, category, department, urgency, confidentialAck };
 		const result = validateDraft(draft);
 		errors = result.errors;
@@ -61,10 +58,7 @@
 			document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
 			return;
 		}
-
-		// Goes to the shared store, so it is visible to managers on every device.
-		busy = true;
-		const res = await app.submitFeedback({
+		const item = app.submitFeedback({
 			title,
 			description,
 			type,
@@ -72,17 +66,9 @@
 			department,
 			urgency,
 			anonymous: forceAnonymous || anonymous,
-			makePublic: makePublic && publicAllowed,
-			confidentialAck
+			makePublic: makePublic && publicAllowed
 		});
-		busy = false;
-
-		if (!res.ok) {
-			errors = res.errors ?? {};
-			app.toast(res.error ?? 'Could not submit your feedback.', 'error');
-			return;
-		}
-		submitted = res.item ?? null;
+		submitted = item;
 		app.toast('Feedback submitted.', 'success');
 	}
 
@@ -280,7 +266,7 @@
 			</div>
 		{/if}
 
-		<button class="btn primary" type="submit" disabled={busy} data-testid="submit-feedback">{busy ? 'Submitting...' : 'Submit feedback'}</button>
+		<button class="btn primary" type="submit" data-testid="submit-feedback">Submit feedback</button>
 	</form>
 {/if}
 

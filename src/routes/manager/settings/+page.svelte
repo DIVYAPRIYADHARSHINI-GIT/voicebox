@@ -19,7 +19,6 @@
 	let freshOpen = $state(false);
 	let sampleOpen = $state(false);
 	let importing = $state(false);
-	let busy = $state(false);
 
 	// Load the form from settings once (not a reactive loop: it writes only while !loaded).
 	$effect(() => {
@@ -39,7 +38,7 @@
 	const lines = (s: string) => s.split('\n').map((x) => x.trim()).filter(Boolean);
 	const words = (s: string) => s.split(/[,\n]/).map((x) => x.trim().toLowerCase()).filter(Boolean);
 
-	async function save() {
+	function save() {
 		const depts = lines(departments);
 		const cats = lines(categories);
 		if (!depts.length || !cats.length) {
@@ -47,8 +46,7 @@
 			return;
 		}
 		if (!cats.includes('Confidential report')) cats.push('Confidential report');
-		busy = true;
-		const res = await app.saveSettings({
+		app.saveSettings({
 			companyName: companyName.trim() || 'Company',
 			departments: depts,
 			categories: cats,
@@ -58,15 +56,14 @@
 			sentimentPositive: words(positive),
 			sentimentNegative: words(negative)
 		});
-		busy = false;
-		app.toast(res.ok ? 'Settings saved for every device.' : (res.error ?? 'Could not save settings.'), res.ok ? 'success' : 'error');
+		app.toast('Settings saved.', 'success');
 	}
 
 	async function loadSample() {
 		sampleOpen = false;
-		const res = await app.loadSampleData();
+		await app.loadSampleData();
 		loaded = false;
-		app.toast(res.ok ? 'Sample data loaded for every device.' : (res.error ?? 'Could not load sample data.'), res.ok ? 'success' : 'error');
+		app.toast('Sample data loaded for Northwind Studio.', 'success');
 	}
 
 	async function onImport(e: Event) {
@@ -81,21 +78,17 @@
 		app.toast(res.ok ? `Backup imported. Imported accounts use the temporary password ${res.tempPassword}.` : (res.error ?? 'Import failed.'), res.ok ? 'success' : 'error');
 	}
 
-	async function startFresh() {
+	function startFresh() {
 		freshOpen = false;
-		const res = await app.startFresh();
-		if (!res.ok) {
-			app.toast(res.error ?? 'Could not clear the data.', 'error');
-			return;
-		}
-		window.location.href = '/manager';
+		app.startFresh();
+		window.location.href = '/manager/login';
 	}
 </script>
 
 <svelte:head><title>Settings - VoiceBox</title></svelte:head>
 
 <h1 data-testid="page-title">Settings</h1>
-<p style="max-width:66ch">Admin/HR only. Changes apply to the shared dataset and take effect on every device.</p>
+<p style="max-width:66ch">Admin/HR only. Changes apply to this browser's data straight away.</p>
 
 <div class="grid-2" style="margin-top:var(--s-4)">
 	<div class="card">
@@ -113,8 +106,8 @@
 		<div class="field">
 			<span class="label">Theme</span>
 			<div class="row">
-				<button class="btn sm" class:primary={app.settings.theme === 'light'} onclick={() => app.setTheme('light')} data-testid="theme-light"><Icon name="sun" size={14} /> Light</button>
-				<button class="btn sm" class:primary={app.settings.theme === 'dark'} onclick={() => app.setTheme('dark')} data-testid="theme-dark"><Icon name="moon" size={14} /> Dark</button>
+				<button class="btn sm" class:primary={app.settings.theme === 'light'} onclick={() => app.saveSettings({ theme: 'light' })} data-testid="theme-light"><Icon name="sun" size={14} /> Light</button>
+				<button class="btn sm" class:primary={app.settings.theme === 'dark'} onclick={() => app.saveSettings({ theme: 'dark' })} data-testid="theme-dark"><Icon name="moon" size={14} /> Dark</button>
 			</div>
 		</div>
 	</div>
@@ -147,8 +140,8 @@
 		<hr class="divider" />
 		<h3>Notifications</h3>
 		<p class="caption">
-			VoiceBox does not send email or push notifications. All notifications appear in the in-app bell only, on whichever
-			device the person signs in from.
+			VoiceBox has no server and no database in demo mode, so it cannot send email or push notifications. All
+			notifications appear in the in-app bell only.
 		</p>
 	</div>
 </div>
@@ -178,9 +171,9 @@
 
 	<div class="card">
 		<div class="card-head"><h2>Data tools</h2></div>
-		<p>These tools act on the shared dataset that every device reads.</p>
+		<p>All data lives in this browser. Use a JSON backup to move it elsewhere.</p>
 		<div class="row">
-			<button class="btn" onclick={() => void downloadBackup()} data-testid="settings-backup"><Icon name="download" size={15} /> Export backup</button>
+			<button class="btn" onclick={() => downloadBackup()} data-testid="settings-backup"><Icon name="download" size={15} /> Export backup</button>
 			<label class="btn" style="cursor:pointer">
 				<Icon name="upload" size={15} />
 				{importing ? 'Importing...' : 'Import backup'}
@@ -193,13 +186,14 @@
 			<button class="btn danger" onclick={() => (freshOpen = true)} data-testid="settings-start-fresh"><Icon name="trash" size={15} /> Start fresh</button>
 		</div>
 		<p class="caption" style="margin-top:var(--s-3)">
-			"Load sample data" replaces the shared dataset with the Northwind Studio demo set (19 accounts, ~44 feedback items, 8 weeks of pulse responses) for everyone.
+			"Load sample data" replaces everything with the Northwind Studio demo set (19 accounts, ~44 feedback items, 8 weeks of
+			pulse responses).
 		</p>
 	</div>
 </div>
 
 <div class="save-bar">
-	<button class="btn primary" onclick={() => void save()} disabled={busy} data-testid="save-settings">{busy ? 'Saving...' : 'Save settings'}</button>
+	<button class="btn primary" onclick={save} data-testid="save-settings">Save settings</button>
 </div>
 
 <ConfirmDialog
@@ -220,7 +214,7 @@
 	confirmLabel="Delete everything"
 	danger
 	requireText="DELETE"
-	onconfirm={() => void startFresh()}
+	onconfirm={startFresh}
 	oncancel={() => (freshOpen = false)}
 	testid="settings-fresh-dialog"
 />

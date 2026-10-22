@@ -3,18 +3,18 @@
 	// comment themes. Any group below the anonymity threshold shows the
 	// protective message instead of numbers.
 	import { app } from '$lib/app.svelte.ts';
-		import { THRESHOLD_MESSAGE } from '$lib/core/rules.ts';
+	import { pulseByDepartment, summarizePulse } from '$lib/core/stats.ts';
+	import { THRESHOLD_MESSAGE } from '$lib/core/rules.ts';
 	import LineChart from '$lib/components/charts/LineChart.svelte';
 	import BarChart from '$lib/components/charts/BarChart.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 
-	// Aggregates come from the server, which has already applied the anonymity
-	// threshold and the department scoping. Raw pulse rows never reach the client,
-	// so an individual answer cannot be reconstructed here.
-	const results = $derived(app.pulseResults);
-	const overall = $derived(results?.overall ?? null);
-	const perDept = $derived(results?.byDepartment ?? []);
-	const shownTrend = $derived((overall?.trend ?? []).filter((t) => t.shown));
+	// Managers see their own department's responses only.
+	const responses = $derived(app.isAdmin ? app.db.pulse : app.db.pulse.filter((p) => p.department === app.account?.department));
+	const overall = $derived(summarizePulse(responses, app.settings));
+	const departments = $derived(app.isAdmin ? app.settings.departments : [app.account?.department ?? '']);
+	const perDept = $derived(pulseByDepartment(responses, app.settings, departments));
+	const shownTrend = $derived(overall.trend.filter((t) => t.shown));
 </script>
 
 <svelte:head><title>Pulse results - VoiceBox</title></svelte:head>
@@ -22,29 +22,29 @@
 <h1 data-testid="page-title">Pulse results</h1>
 <p style="max-width:66ch">
 	{app.isAdmin ? 'All departments.' : `${app.account?.department} only.`}
-	Results are hidden for any group with fewer than {results?.threshold ?? app.settings.anonymityThreshold} responses, so individual answers can never be
+	Results are hidden for any group with fewer than {app.settings.anonymityThreshold} responses, so individual answers can never be
 	inferred. The threshold is editable in Settings.
 </p>
 
-{#if !overall || !overall.shown}
+{#if !overall.shown}
 	<div class="card notice warn" data-testid="pulse-threshold">
 		<Icon name="shield" size={18} />
 		<div>
 			<strong>{THRESHOLD_MESSAGE}</strong>
 			<p style="margin:4px 0 0; color:inherit">
-				This group has {overall?.responses ?? 0} response(s); at least {results?.threshold ?? app.settings.anonymityThreshold} are needed.
+				This group has {overall.responses} response(s); at least {app.settings.anonymityThreshold} are needed.
 			</p>
 		</div>
 	</div>
 {:else}
 	<div class="grid-4" style="margin:var(--s-4) 0">
-		<div class="card tight kpi"><span class="l">Responses</span><span class="v num" data-testid="pulse-responses">{overall?.responses}</span></div>
+		<div class="card tight kpi"><span class="l">Responses</span><span class="v num" data-testid="pulse-responses">{overall.responses}</span></div>
 		<div class="card tight kpi">
 			<span class="l">eNPS</span>
-			<span class="v num" data-testid="pulse-enps">{overall?.enps.score}</span>
-			<span class="caption">{overall?.enps.promoters} promoters / {overall?.enps.detractors} detractors</span>
+			<span class="v num" data-testid="pulse-enps">{overall.enps.score}</span>
+			<span class="caption">{overall.enps.promoters} promoters / {overall.enps.detractors} detractors</span>
 		</div>
-		{#each overall?.scores ?? [].slice(0, 2) as s (s.questionId)}
+		{#each overall.scores.slice(0, 2) as s (s.questionId)}
 			<div class="card tight kpi">
 				<span class="l">{s.text}</span>
 				<span class="v num">{s.average ?? '-'}<span class="of">/5</span></span>
@@ -55,7 +55,7 @@
 	<div class="grid-2">
 		<div class="card">
 			<div class="card-head"><h2>Scores by question</h2><span class="caption">1-5 scale</span></div>
-			<BarChart data={(overall?.scores ?? []).map((s) => ({ label: s.text, value: s.average ?? 0 }))} horizontal valueSuffix="" testid="pulse-scores" />
+			<BarChart data={overall.scores.map((s) => ({ label: s.text, value: s.average ?? 0 }))} horizontal valueSuffix="" testid="pulse-scores" />
 		</div>
 		<div class="card">
 			<div class="card-head"><h2>Weekly trend</h2><span class="caption">average of the 1-5 questions</span></div>
@@ -76,10 +76,10 @@
 					{#each perDept as row (row.department)}
 						<tr>
 							<td>{row.department}</td>
-							{#if row.shown}
-								<td class="num">{row.responses}</td>
-								<td class="num">{Math.round((row.scores.reduce((s, x) => s + (x.average ?? 0), 0) / Math.max(row.scores.length, 1)) * 10) / 10}</td>
-								<td class="num">{row.enps?.score ?? '-'}</td>
+							{#if row.summary.shown}
+								<td class="num">{row.summary.responses}</td>
+								<td class="num">{Math.round((row.summary.scores.reduce((s, x) => s + (x.average ?? 0), 0) / Math.max(row.summary.scores.length, 1)) * 10) / 10}</td>
+								<td class="num">{row.summary.enps.score}</td>
 							{:else}
 								<td colspan="3" class="caption" data-testid="dept-threshold">{THRESHOLD_MESSAGE}</td>
 							{/if}
@@ -90,15 +90,15 @@
 		</div>
 		<div class="card">
 			<div class="card-head"><h2>Comment themes</h2><span class="caption">most frequent words in comments</span></div>
-			{#if (overall?.themes ?? []).length}
+			{#if overall.themes.length}
 				<ul class="themes" data-testid="pulse-themes">
-					{#each overall?.themes ?? [] as t (t.label)}
+					{#each overall.themes as t (t.label)}
 						<li><span class="pill">{t.label}</span><span class="caption num">{t.count}</span></li>
 					{/each}
 				</ul>
 				<h3 style="margin:var(--s-4) 0 var(--s-2)">Recent comments</h3>
 				<ul class="comments">
-					{#each overall?.comments ?? [].slice(-6).reverse() as c, i (i)}<li>{c}</li>{/each}
+					{#each overall.comments.slice(-6).reverse() as c, i (i)}<li>{c}</li>{/each}
 				</ul>
 			{:else}
 				<p class="caption">No comments yet.</p>
